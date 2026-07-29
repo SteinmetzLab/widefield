@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "widefield"
+version = "0.1.0"
+description = "Image processing, analysis and interactive viewers for widefield calcium imaging"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Steinmetz Lab" }]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+# The interactive viewers. Kept optional so `widefield.svd`, `widefield.events`, ... stay
+# importable on a headless box with no Qt (mirrors DataBrowser's core-portable CI job).
+gui = [
+    "pyqtgraph>=0.13",
+    "PySide6>=6.5",
+]
+dev = [
+    "pytest>=7",
+    "pytest-qt>=4",
+    "ruff>=0.4",
+    "black>=24",
+]
+
+[project.scripts]
+widefield-view = "widefield.gui.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "NPY"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::RuntimeWarning"]
+markers = [
+    "matlab: cross-validates Python output against MATLAB via the MATLAB MCP (needs MATLAB)",
+    "server: needs the lab data server mounted (Y:\\Subjects)",
+]

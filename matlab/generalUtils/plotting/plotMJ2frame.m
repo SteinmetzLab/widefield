@@ -16,5 +16,6 @@ if ~isempty(thisFrame)
         axis image
     else
         set(imHand, 'CData', img);
+
     end
 end
