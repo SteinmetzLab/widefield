@@ -1,4 +1,4 @@
-"""Movie viewer with synchronised traces. Port of ``movieWithTracesSVD.m``.
+"""Movie viewer with synchronized traces. Port of ``movieWithTracesSVD.m``.
 
 Plays the reconstructed movie next to a scrolling window of whatever traces you hand it (wheel
 speed, pupil, licks, a V component, ...) plus the timecourse of every pixel you have clicked, so
@@ -13,15 +13,21 @@ MATLAB parity
 up / down                    double / halve playback rate
 ``b``                        jump back 20 frames x rate
 click                        move the selected pixel
-right-click                  add another pixel (each gets its own colour)
+**ctrl+click**               add another pixel (each gets its own color)
 ``c``                        clear all but the last pixel
-``-`` / ``=``                shrink / grow the colour scale (stays centred on zero)
+``-`` / ``=``                shrink / grow the color scale (stays centered on zero)
 alt + left/right             rotate 90 degrees
 alt + up/down                flip vertically
 ==========================  ============================================================
 
-Additions: a scrub slider and frame/time readout, ``home`` to jump to the start, and
-``nsv_display`` to cap the components used per frame when full-rank playback can't keep up.
+Adding a pixel is ctrl+click rather than the MATLAB's right-click: in pyqtgraph right-click
+opens the view's own context menu, so the two actions fought each other.
+
+Additions over the MATLAB: a scrub slider and frame/time readout, ``home`` to jump to the start,
+a **temporal band-pass** (type cutoffs in Hz; filtering ``V`` filters every pixel, so it is cheap
+to re-apply), a **Follow** toggle so a manual zoom on the trace plots survives playback instead
+of being reset every frame, and ``nsv_display`` to cap the components used per frame when
+full-rank playback can't keep up.
 """
 
 from __future__ import annotations
@@ -31,8 +37,15 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from widefield.colormaps import blueblackred, to_pyqtgraph
-from widefield.gui._common import Orientation, ensure_app, require_qt, run_app
-from widefield.svd import flatten_u
+from widefield.gui._common import (
+    Orientation,
+    ensure_app,
+    install_hotkeys,
+    require_qt,
+    run_app,
+    text_entry_focused,
+)
+from widefield.svd import bandpass_filt, flatten_u
 
 __all__ = ["Trace", "AuxVideo", "movie_with_traces"]
 
@@ -43,7 +56,7 @@ _JUMP_BACK_FRAMES = 20  # MATLAB's 'b'
 # nPix * block * 4 bytes (~33 MB at 32 frames) and turns a GEMV into a GEMM.
 _PREFETCH_BLOCK = 32
 
-# MATLAB's default axes ColorOrder, so multi-pixel colours match a MATLAB figure.
+# MATLAB's default axes ColorOrder, so multi-pixel colors match a MATLAB figure.
 _PIXEL_COLORS = np.array(
     [
         [0.0000, 0.4470, 0.7410],
@@ -158,9 +171,13 @@ def _build():
             #     V that column is strided and BLAS copies it on every single frame, which
             #     measured 10.7 ms/frame versus 7.9 ms on a real 512x512 session.
             self._flat_u = flatten_u(self._u[..., :nsv]).astype(np.float32, copy=False)
+            # Keep the unfiltered components: the band-pass control re-derives _v32 from these,
+            # so filtering is always a single pass from the original rather than compounding.
+            self._v_raw = np.asarray(self._v[:nsv], dtype=np.float64)
             self._v32 = np.asfortranarray(self._v[:nsv], dtype=np.float32)
             self._block_start = -1
             self._block: np.ndarray | None = None
+            self._fs = float(1.0 / np.median(np.diff(self._t))) if self._t.size > 1 else 1.0
 
             self._traces = _as_traces(traces)
             self._aux = list(aux_videos or [])
@@ -207,6 +224,17 @@ def _build():
             self._readout.setMinimumWidth(260)
             controls.addWidget(self._readout)
 
+            # Follow: keep the trace window centerd on the current frame. Any manual zoom or pan
+            # switches it off so the user's view survives playback (see _on_manual_range).
+            self._follow_chk = QtWidgets.QCheckBox("Follow")
+            self._follow_chk.setChecked(True)
+            self._follow_chk.setToolTip(
+                "Keep the trace window centered on the current frame.\n"
+                "Zooming or panning a trace plot turns this off; re-check it to resume."
+            )
+            self._follow_chk.toggled.connect(self._on_follow_toggled)
+            controls.addWidget(self._follow_chk)
+
             if self._movie_save_path is not None:
                 self._rec_btn = QtWidgets.QPushButton("record")
                 self._rec_btn.setCheckable(True)
@@ -214,6 +242,38 @@ def _build():
                 self._rec_btn.toggled.connect(self._set_recording)
                 controls.addWidget(self._rec_btn)
             root.addLayout(controls)
+
+            # Temporal band-pass. Filtering V filters every pixel, so this is cheap enough to
+            # re-apply interactively.
+            filt_row = QtWidgets.QHBoxLayout()
+            filt_row.addWidget(QtWidgets.QLabel("Band-pass — high-pass (Hz):"))
+            self._hp_edit = QtWidgets.QLineEdit("0")
+            self._hp_edit.setFixedWidth(70)
+            self._hp_edit.setToolTip("Lower cutoff in Hz. 0 means no high-pass.")
+            filt_row.addWidget(self._hp_edit)
+            filt_row.addWidget(QtWidgets.QLabel("low-pass (Hz):"))
+            self._lp_edit = QtWidgets.QLineEdit("inf")
+            self._lp_edit.setFixedWidth(70)
+            self._lp_edit.setToolTip(
+                f"Upper cutoff in Hz. inf means no low-pass (Nyquist is " f"{self._fs / 2:.2f} Hz)."
+            )
+            filt_row.addWidget(self._lp_edit)
+            apply_btn = QtWidgets.QPushButton("Apply")
+            apply_btn.setFixedWidth(70)
+            apply_btn.clicked.connect(self._apply_filter)
+            filt_row.addWidget(apply_btn)
+            reset_btn = QtWidgets.QPushButton("Reset")
+            reset_btn.setFixedWidth(70)
+            reset_btn.clicked.connect(self._reset_filter)
+            filt_row.addWidget(reset_btn)
+            self._filt_label = QtWidgets.QLabel("unfiltered")
+            self._filt_label.setStyleSheet("color: gray;")
+            filt_row.addWidget(self._filt_label)
+            filt_row.addStretch(1)
+            # Enter in either box applies, which is what you expect after typing a number.
+            self._hp_edit.returnPressed.connect(self._apply_filter)
+            self._lp_edit.returnPressed.connect(self._apply_filter)
+            root.addLayout(filt_row)
 
             self._glw = pg.GraphicsLayoutWidget()
             root.addWidget(self._glw, stretch=1)
@@ -248,12 +308,14 @@ def _build():
                     p.setTitle(self._traces[i].name or None, size="9pt")
                     self._trace_curves.append([p.plot(pen=pg.mkPen("w", width=1))])
                 else:
-                    p.setLabel("bottom", "time", units="s")
-                    p.setTitle("selected pixels", size="9pt")
+                    p.setLabel("bottom", "Time (s)")
+                    p.setTitle("Selected pixels", size="9pt")
                     self._trace_curves.append([])  # one curve per selected pixel, added lazily
                 mark = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen("y", style=QtCore.Qt.DashLine))
                 p.addItem(mark)
                 self._trace_marks.append(mark)
+                # Manual zoom/pan on any trace plot pins the view (turns Follow off).
+                p.vb.sigRangeChangedManually.connect(self._on_manual_range)
                 self._trace_plots.append(p)
             # Traces share a time axis; linking means zooming one zooms all.
             for p in self._trace_plots[1:]:
@@ -266,7 +328,7 @@ def _build():
                 p.invertY(True)
                 p.hideAxis("bottom")
                 p.hideAxis("left")
-                p.setTitle(aux.name or f"aux {j}", size="9pt")
+                p.setTitle(aux.name or f"Aux {j}", size="9pt")
                 item = pg.ImageItem()
                 p.addItem(item)
                 self._aux_items.append(item)
@@ -275,8 +337,8 @@ def _build():
             self._glw.ci.layout.setColumnStretchFactor(1, 2)
 
             hint = QtWidgets.QLabel(
-                "p: play · up/down: rate · b: back · click/right-click: pixel · c: clear · "
-                "-/=: colour scale · alt+arrows: rotate/flip"
+                "p: play · up/down: rate · b: back · click: move pixel · "
+                "ctrl+click: add pixel · c: clear · -/=: color scale · alt+arrows: rotate/flip"
                 + ("  · r: record" if self._movie_save_path else "")
             )
             hint.setStyleSheet("color: gray;")
@@ -285,6 +347,8 @@ def _build():
 
             self._image.scene().sigMouseClicked.connect(self._on_click)
             self.setFocusPolicy(QtCore.Qt.StrongFocus)
+            # Route keys from anywhere in the window (image, buttons, slider) to _handle_key.
+            install_hotkeys(self, self._handle_key)
 
         # ---------------------------------------------------------------- computation
 
@@ -329,16 +393,31 @@ def _build():
             if not (0 <= dy < dh and 0 <= dx < dw):
                 return
             pixel = self._orient.to_data(dy, dx, self.shape)
-            if event.button() == QtCore.Qt.RightButton:
+            # Ctrl+click adds a pixel. The MATLAB used right-click, but in pyqtgraph right-click
+            # is the view's own context menu (autoscale, export, ...), so the two fought: you got
+            # a menu *and* a new point on every attempt.
+            if event.modifiers() & QtCore.Qt.ControlModifier:
                 self._pixels.append(pixel)  # keep the old one, as the MATLAB does
-            else:
+            elif event.button() == QtCore.Qt.LeftButton:
                 self._pixels[-1] = pixel
+            else:
+                return  # right-click: leave it to the context menu
             self._recompute_pixel_traces()
             self._refresh()
 
         def keyPressEvent(self, event):
-            key, mods = event.key(), event.modifiers()
+            # text_entry_focused: a cutoff box that ignores a key lets it propagate here,
+            # where acting on it would fire hotkeys while the user is typing a number.
+            if text_entry_focused(self) or not self._handle_key(event.key(), event.modifiers()):
+                super().keyPressEvent(event)
 
+        def _handle_key(self, key, mods) -> bool:
+            """Act on a hotkey. Returns True if it was consumed.
+
+            Split out of ``keyPressEvent`` so :func:`install_hotkeys` can call it for key presses
+            delivered to any child widget — otherwise the shortcuts only work while the top-level
+            widget holds focus, which it loses as soon as you click the image or a button.
+            """
             if mods & QtCore.Qt.AltModifier:
                 if key == QtCore.Qt.Key_Right:
                     self._orient.rotate(-1)
@@ -347,9 +426,9 @@ def _build():
                 elif key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
                     self._orient.toggle_flip()
                 else:
-                    return super().keyPressEvent(event)
+                    return False
                 self._refresh(full=True)
-                return
+                return True
 
             if key == QtCore.Qt.Key_P:
                 self._play_btn.setChecked(not self._play_btn.isChecked())
@@ -375,7 +454,70 @@ def _build():
             elif key == QtCore.Qt.Key_R and self._movie_save_path is not None:
                 self._rec_btn.setChecked(not self._rec_btn.isChecked())
             else:
-                super().keyPressEvent(event)
+                return False
+            return True
+
+        # ---------------------------------------------------------------- band-pass filter
+
+        @staticmethod
+        def _parse_cutoff(text: str, default: float) -> float:
+            text = text.strip().lower()
+            if text in ("", "none"):
+                return default
+            if text in ("inf", "+inf", "infinity"):
+                return np.inf
+            return float(text)
+
+        def _apply_filter(self) -> None:
+            """Band-pass V and rebuild everything derived from it."""
+            try:
+                hp = self._parse_cutoff(self._hp_edit.text(), 0.0)
+                lp = self._parse_cutoff(self._lp_edit.text(), np.inf)
+                filtered = bandpass_filt(self._v_raw, self._fs, highpass=hp, lowpass=lp)
+            except ValueError as exc:
+                self._filt_label.setText(f"invalid: {exc}")
+                self._filt_label.setStyleSheet("color: #cc4444;")
+                return
+
+            self._v32 = np.asfortranarray(filtered, dtype=np.float32)
+            self._invalidate_frames()
+            self._recompute_pixel_traces()
+
+            nyquist = self._fs / 2.0
+            active_hp = hp > 0
+            active_lp = np.isfinite(lp) and lp < nyquist
+            if active_hp and active_lp:
+                desc = f"band-pass {hp:g}–{lp:g} Hz"
+            elif active_hp:
+                desc = f"high-pass {hp:g} Hz"
+            elif active_lp:
+                desc = f"low-pass {lp:g} Hz"
+            else:
+                desc = "unfiltered"
+            self._filt_label.setText(f"{desc} (Butterworth order 3, zero-phase)")
+            self._filt_label.setStyleSheet("color: gray;")
+            self._refresh()
+
+        def _reset_filter(self) -> None:
+            self._hp_edit.setText("0")
+            self._lp_edit.setText("inf")
+            self._apply_filter()
+
+        def _invalidate_frames(self) -> None:
+            """Drop the prefetched reconstruction block after V changes underneath it."""
+            self._block = None
+            self._block_start = -1
+
+        # ---------------------------------------------------------------- follow / zoom
+
+        def _on_manual_range(self, *_):
+            """A manual zoom or pan means the user wants that view kept, so stop following."""
+            if self._follow_chk.isChecked():
+                self._follow_chk.setChecked(False)  # triggers _on_follow_toggled
+
+        def _on_follow_toggled(self, on: bool) -> None:
+            if on:
+                self._refresh()  # snap straight back to the sliding window
 
         def _scale_cax(self, factor: float) -> None:
             # Stays symmetric about zero — signed dF/F must keep zero at the colormap's black.
@@ -474,23 +616,32 @@ def _build():
             half = _WINDOW_SECONDS / 2.0
             lo, hi = now - half, now + half
 
+            # While following, the plotted slice is just the visible window — cheap, and it keeps
+            # the traces scrolling. Once the user has zoomed we hand over the whole trace so
+            # panning around does not run off the end of the data.
+            follow = self._follow_chk.isChecked()
+
             for i, trace in enumerate(self._traces):
-                sel = slice(*np.searchsorted(trace.t, [lo, hi]))
+                if follow:
+                    sel = slice(*np.searchsorted(trace.t, [lo, hi]))
+                    if trace.lims is not None:
+                        self._trace_plots[i].setYRange(*trace.lims, padding=0)
+                else:
+                    sel = slice(None)
                 self._trace_curves[i][0].setData(trace.t[sel], trace.v[sel])
-                if trace.lims is not None:
-                    self._trace_plots[i].setYRange(*trace.lims, padding=0)
 
             self._rebuild_pixel_curves()
-            sel = slice(*np.searchsorted(self._t, [lo, hi]))
+            sel = slice(*np.searchsorted(self._t, [lo, hi])) if follow else slice(None)
             # strict: _rebuild_pixel_curves just synced the curves to self._pixels, and the
             # traces were computed from the same list, so a length mismatch is a real bug.
             for curve, pt in zip(self._trace_curves[-1], self._pixel_traces, strict=True):
                 curve.setData(self._t[sel], pt[sel])
-            self._trace_plots[-1].setYRange(*self._cax, padding=0)
 
-            self._trace_plots[0].setXRange(lo, hi, padding=0)
+            if follow:
+                self._trace_plots[-1].setYRange(*self._cax, padding=0)
+                self._trace_plots[0].setXRange(lo, hi, padding=0)
             for mark in self._trace_marks:
-                mark.setPos(now)
+                mark.setPos(now)  # the time cursor tracks the frame either way
 
             aux_errors = []
             for item, aux in zip(self._aux_items, self._aux, strict=True):
@@ -593,7 +744,7 @@ def movie_with_traces(
     aux_videos : sequence of :class:`AuxVideo` for extra panels (eye/face cameras).
     nsv_display : cap components used per reconstructed frame. Lower it if full-rank playback
         stutters; the image gets smoother, not wrong.
-    cax : initial colour limits. The default assumes dF/F — run :func:`widefield.dff_from_svd`
+    cax : initial color limits. The default assumes dF/F — run :func:`widefield.dff_from_svd`
         first, or widen this, for raw components.
     """
     app = ensure_app()

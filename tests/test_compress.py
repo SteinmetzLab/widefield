@@ -145,7 +145,7 @@ def test_roi_zeroes_outside_pixels(sref):
 
 
 def test_u_columns_are_unit_norm(compressed):
-    """MATLAB's normc: each spatial component is normalised."""
+    """MATLAB's normc: each spatial component is normalized."""
     flat = compressed.u.reshape(-1, compressed.u.shape[-1])
     norms = np.linalg.norm(flat, axis=0)
     np.testing.assert_allclose(norms, 1.0, atol=1e-5)
@@ -162,12 +162,12 @@ def test_reconstruction_recovers_the_movie(sref):
     r = svd_compress(RAW, sref["svd_mimg"], n_svd=15, n_avg_frames_svd=300)
     batches = list(iter_raw_frames(RAW, sref["svd_Ly"], sref["svd_Lx"], np.uint16))
     stack = np.concatenate([b for _, b in batches], axis=2)
-    centred = stack - np.asarray(sref["svd_mimg"])[:, :, None]
+    centerd = stack - np.asarray(sref["svd_mimg"])[:, :, None]
 
     recon = svd_frame_reconstruct(r.u, r.v[:, :50])
-    residual = centred[:, :, :50] - recon
+    residual = centerd[:, :, :50] - recon
     # 15 components on a rank-5 + noise movie should leave only the noise floor.
-    assert residual.std() < 0.25 * centred[:, :, :50].std()
+    assert residual.std() < 0.25 * centerd[:, :, :50].std()
 
 
 def test_total_var_equals_sum_of_all_eigenvalues(sref):

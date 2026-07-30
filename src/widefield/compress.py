@@ -204,7 +204,7 @@ def svd_compress(
     sv = eigvals[order]
     basis = eigvecs[:, order]
 
-    # Spatial components: project the averaged stack onto the basis, then normalise each column
+    # Spatial components: project the averaged stack onto the basis, then normalize each column
     # (MATLAB's normc). Zero-norm columns are left at zero rather than producing NaN.
     u_flat = flat_mov @ basis
     norms = np.linalg.norm(u_flat, axis=0)

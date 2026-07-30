@@ -43,7 +43,7 @@ def test_seed_map_matches_matlab(ref):
 
 
 def test_seed_map_normalize_by_max_matches_matlab(ref):
-    """The viewer's 'V' key: normalise by the global max variance instead of each pixel's."""
+    """The viewer's 'V' key: normalize by the global max variance instead of each pixel's."""
     sc = SeedCorrelation(ref["U"], ref["V"], dtype=np.float64)
     pixel = tuple(int(p) - 1 for p in ref["corr_pixel"])
     got = sc.map(pixel, normalize_by_max=True)

@@ -1,0 +1,278 @@
+"""Open all four viewers on one session, for kicking the tyres.
+
+    python examples/try_viewers.py                       # default session on the server
+    python examples/try_viewers.py --session "Y:\\Subjects\\ZYE_0057\\2022-01-10\\1"
+    python examples/try_viewers.py --demo                 # synthetic data, no server needed
+    python examples/try_viewers.py --nsv 500              # more components (slower load)
+
+Windows are tiled across the screen. Each is independent; the process exits when you close them
+all. Keyboard shortcuts are listed along the bottom of each window and in the module docstrings.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+from pathlib import Path
+
+import numpy as np
+
+import widefield as wf
+from widefield.gui._common import ensure_app
+from widefield.gui.movie_with_traces import Trace
+from widefield.gui.movie_with_traces import _get_class as movie_class
+from widefield.gui.pixel_correlation import _get_class as corr_class
+from widefield.gui.pixel_tuning_curve import _get_class as tuning_class
+from widefield.gui.svd_viewer import _get_class as svd_class
+
+DEFAULT_SESSION = r"Y:\Subjects\AB_0004\2021-03-24\1"
+N_CONDITIONS = 4
+
+log = logging.getLogger("try_viewers")
+
+
+# --------------------------------------------------------------------------- data loading
+
+
+def load_sv(session: Path, n_components: int):
+    """Real singular values + total variance from ``blue/dataSummary.mat``, if present.
+
+    Without them the component browser can only show percentages of the variance *retained*,
+    which understates how much of the movie the leading components actually explain.
+    """
+    path = session / "blue" / "dataSummary.mat"
+    if not path.exists():
+        return None, None
+    try:
+        from scipy.io import loadmat
+
+        m = loadmat(str(path))
+        sv = np.asarray(m["Sv"], dtype=float).ravel()[:n_components]
+        total = float(np.asarray(m["totalVar"]).ravel()[0])
+        return sv, total
+    except Exception as exc:  # a missing/odd dataSummary must not stop the demo
+        log.warning("could not read %s (%s); falling back to component variance", path.name, exc)
+        return None, None
+
+
+def load_timeline_trace(session: Path, name: str):
+    """Load a Timeline analogue channel as ``(t, v)``.
+
+    The ``*.timestamps_Timeline.npy`` files are a 2-point linear map from sample index to
+    Timeline seconds (``[[i0, t0], [i1, t1]]``), not a per-sample vector, so the time base is
+    interpolated rather than read.
+    """
+    raw = session / f"{name}.raw.npy"
+    ts = session / f"{name}.timestamps_Timeline.npy"
+    if not (raw.exists() and ts.exists()):
+        return None
+    try:
+        v = np.asarray(np.load(raw, mmap_mode="r")).ravel().astype(float)
+        m = np.asarray(np.load(ts)).reshape(-1, 2)
+        idx, times = m[:, 0], m[:, 1]
+        t = np.interp(np.arange(v.size), idx, times)
+        return t, v
+    except Exception as exc:
+        log.warning("could not read Timeline channel %r (%s)", name, exc)
+        return None
+
+
+def stim_times_from_photodiode(session: Path, min_gap_s: float = 1.0, cap: int = 300):
+    """Detect stimulus onsets from the photodiode with a Schmitt trigger.
+
+    Returns ``None`` if the trace is missing or the result looks implausible, so the caller can
+    fall back to invented times. Real condition labels would come from the trials ALF, which this
+    session does not have — see :func:`make_events`.
+    """
+    got = load_timeline_trace(session, "photodiode")
+    if got is None:
+        return None
+    t, v = got
+    lo, hi = np.percentile(v, [20, 80])
+    if hi - lo < 1e-6:  # flat trace: no stimuli, or the channel was not recorded
+        return None
+    flips, up, _down = wf.schmitt_times(t, v, (lo, hi))
+    if up.size < 10:
+        return None
+    # Keep only onsets separated by at least min_gap_s: the photodiode also flips on every
+    # stimulus frame, and we want trial starts.
+    keep = [up[0]]
+    for x in up[1:]:
+        if x - keep[-1] >= min_gap_s:
+            keep.append(x)
+    onsets = np.array(keep)
+    if onsets.size < 10:
+        return None
+    if onsets.size > cap:  # evenly thin, keeping the spread across the session
+        onsets = onsets[np.linspace(0, onsets.size - 1, cap).astype(int)]
+    return onsets
+
+
+def make_events(session: Path, t: np.ndarray, rng):
+    """Event times + condition labels for the tuning viewer, and a note on their provenance."""
+    onsets = stim_times_from_photodiode(session) if session is not None else None
+    if onsets is not None:
+        onsets = onsets[(onsets > t[0] + 1.0) & (onsets < t[-1] - 2.0)]
+    if onsets is None or onsets.size < 10:
+        onsets = np.sort(rng.uniform(t[0] + 1.0, t[-1] - 2.0, 200))
+        source = "invented (random) times"
+    else:
+        source = f"photodiode onsets ({onsets.size})"
+    # This session has no trials ALF, so there are no real condition labels. Cycling through
+    # four pseudo-conditions exercises the viewer; the tuning curve is meaningless by design.
+    labels = np.arange(onsets.size) % N_CONDITIONS / (N_CONDITIONS - 1.0)
+    return onsets, labels, source + ", pseudo-conditions"
+
+
+def demo_data():
+    """Synthetic session with a couple of traveling blobs, so the movie has visible structure."""
+    rng = np.random.default_rng(0)
+    ypix, xpix, nsv, nframes, fs = 128, 128, 60, 4000, 35.0
+    t = np.arange(nframes) / fs
+
+    yy, xx = np.mgrid[0:ypix, 0:xpix]
+    movie = np.zeros((ypix, xpix, 0), dtype=np.float32)
+    # Build a low-rank movie directly in U/V form rather than pixel space (which would be 260 MB).
+    centers = [(40, 40), (90, 45), (60, 95), (30, 100)]
+    freqs = [0.20, 0.35, 0.11, 0.55]
+    u_list, v_list = [], []
+    for (cy, cx), f in zip(centers, freqs, strict=True):
+        blob = np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 14.0**2))
+        u_list.append(blob.astype(np.float32))
+        v_list.append((np.sin(2 * np.pi * f * t) * 0.3).astype(np.float32))
+    u = np.stack(u_list, axis=2)
+    v = np.stack(v_list, axis=0)
+    # Pad out to nsv with low-amplitude noise components so the browser has something to page.
+    u_noise = rng.standard_normal((ypix, xpix, nsv - u.shape[2])).astype(np.float32) * 0.02
+    v_noise = rng.standard_normal((nsv - v.shape[0], nframes)).astype(np.float32) * 0.05
+    u = np.ascontiguousarray(np.concatenate([u, u_noise], axis=2))
+    v = np.ascontiguousarray(np.concatenate([v, v_noise], axis=0))
+    del movie
+
+    sv = np.array([np.var(row) * np.sum(u[..., i] ** 2) for i, row in enumerate(v)])
+    order = np.argsort(sv)[::-1]
+    return u[..., order], v[order], t, fs, sv[order], float(sv.sum())
+
+
+# --------------------------------------------------------------------------- layout
+
+
+def tile(windows, app):
+    """Lay the windows out in a 2x2 grid on the primary screen."""
+    geo = app.primaryScreen().availableGeometry()
+    w, h = geo.width() // 2, geo.height() // 2
+    for i, win in enumerate(windows):
+        col, row = i % 2, i // 2
+        win.resize(w - 20, h - 40)
+        win.move(geo.x() + col * w + 10, geo.y() + row * h + 10)
+        win.show()
+        win.raise_()
+
+
+# --------------------------------------------------------------------------- main
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--session", default=DEFAULT_SESSION, help="session folder on the server")
+    ap.add_argument("--demo", action="store_true", help="synthetic data; no server needed")
+    ap.add_argument("--nsv", type=int, default=200, help="components to load (default 200)")
+    ap.add_argument("--calc-win", type=float, nargs=2, default=(-0.3, 0.8), metavar=("T0", "T1"))
+    ap.add_argument(
+        "--no-exec",
+        action="store_true",
+        help="build everything and exit without entering the event loop (smoke test)",
+    )
+    args = ap.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    rng = np.random.default_rng(0)
+    app = ensure_app()
+
+    if args.demo:
+        u, v, t, fs, sv, total_var = demo_data()
+        dff_u, dff_v = u, v  # already dF/F-scaled
+        session = None
+        extra_traces = []
+        log.info("demo data: %s px, %d components, %d frames", u.shape[:2], v.shape[0], v.shape[1])
+    else:
+        session = Path(args.session)
+        log.info("loading %s (nsv=%d) ...", session, args.nsv)
+        corr = wf.load_uvt(session, nsv=args.nsv, channel="corr")
+        u, v, t, fs = corr.u, corr.v, corr.t, corr.fs
+        log.info(
+            "  %s px, %d components, %d frames, fs=%.3f Hz", u.shape[:2], v.shape[0], v.shape[1], fs
+        )
+
+        sv, total_var = load_sv(session, v.shape[0])
+        if sv is None:
+            sv, total_var = v.var(axis=1), None
+
+        # The movie viewer's default color scale assumes dF/F, so give it dF/F.
+        blue = wf.load_uvt(session, nsv=args.nsv, channel="blue")
+        log.info("  computing dF/F ...")
+        dff_u, dff_v = wf.dff_from_svd(blue.u, blue.v, blue.mean_image)
+        t_movie = blue.t
+
+        extra_traces = []
+        for name, label in (("rotaryEncoder", "wheel"), ("photodiode", "photodiode")):
+            got = load_timeline_trace(session, name)
+            if got is not None:
+                # Decimate: these run at ~2 kHz for 11 minutes and only ~10 s is ever on screen.
+                tt, vv = got
+                extra_traces.append(Trace(t=tt[::10], v=vv[::10], name=label))
+        log.info("  behavioral traces: %s", [tr.name for tr in extra_traces] or "none found")
+
+    event_times, event_labels, event_source = make_events(session, t, rng)
+    log.info("  tuning events: %s", event_source)
+
+    windows = []
+
+    log.info("building SVD component browser ...")
+    w_svd = svd_class()(u, sv, v, fs=fs, total_variance=total_var)
+    w_svd.setWindowTitle("1. SVD viewer  —  svdViewer")
+    windows.append(w_svd)
+
+    log.info("building correlation viewer (precomputing covariance) ...")
+    w_corr = corr_class()(u, v, t=t)
+    w_corr.setWindowTitle("2. Pixel correlation  —  pixelCorrelationViewerSVD")
+    windows.append(w_corr)
+
+    log.info("building tuning viewer (event-locked average) ...")
+    w_tun = tuning_class()(u, v, t, event_times, event_labels, tuple(args.calc_win))
+    w_tun.setWindowTitle(f"3. Pixel tuning  —  pixelTuningCurveViewerSVD  [{event_source}]")
+    windows.append(w_tun)
+
+    log.info("building movie viewer ...")
+    pixel_trace = wf.pixel_timecourse(u, v, (u.shape[0] // 2, u.shape[1] // 2))
+    traces = [Trace(t=t, v=pixel_trace, name="center pixel"), *extra_traces]
+    w_movie = movie_class()(
+        dff_u,
+        dff_v,
+        t=t if args.demo else t_movie,
+        traces=traces,
+    )
+    w_movie.setWindowTitle("4. Movie with traces  —  movieWithTracesSVD")
+    windows.append(w_movie)
+
+    tile(windows, app)
+
+    log.info("")
+    log.info("All four open. Things worth trying:")
+    log.info("  1 SVD viewer      left/right to page components; p then click for pixel mode")
+    log.info("  2 Correlation     click around; h for hover; v for variance normalization")
+    log.info("  3 Tuning          click all three panels; p to play; r for an ROI; ijkl")
+    log.info("  4 Movie           p to play; ctrl+click to add pixels; -/= color scale;")
+    log.info("                    type band-pass cutoffs in Hz; Follow keeps a zoom on playback")
+    log.info("  any               alt+arrows to rotate/flip; hotkeys work with any focus")
+    log.info("")
+    log.info("Close all four windows to exit.")
+    if args.no_exec:
+        log.info("(--no-exec: built OK, exiting without showing anything)")
+        return 0
+    app.exec()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

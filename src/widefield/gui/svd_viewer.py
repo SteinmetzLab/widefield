@@ -3,7 +3,7 @@
 Steps through the decomposition one component at a time — spatial map, timecourse, and power
 spectrum — against the variance-explained curve. This is the first thing to look at after
 compressing a session: it tells you how many components carry real signal, and it makes
-artefacts (a light leak, a stuck LED, motion) obvious as a component with a recognisable
+artifacts (a light leak, a stuck LED, motion) obvious as a component with a recognizable
 spatial pattern.
 
 Controls
@@ -12,7 +12,7 @@ Controls
 left / right               previous / next component
 click variance plot        jump to that component
 click spatial map, ``p``   toggle pixel mode: full vs cumulative reconstruction of a pixel
-``-`` / ``=``              shrink / grow the spatial colour scale
+``-`` / ``=``              shrink / grow the spatial color scale
 alt + left/right           rotate 90 degrees
 alt + up/down              flip vertically
 ``z``                      reset the zoom on the trace plots
@@ -27,7 +27,14 @@ from __future__ import annotations
 import numpy as np
 
 from widefield.colormaps import blueblackred, to_pyqtgraph
-from widefield.gui._common import Orientation, ensure_app, require_qt, run_app
+from widefield.gui._common import (
+    Orientation,
+    ensure_app,
+    install_hotkeys,
+    require_qt,
+    run_app,
+    text_entry_focused,
+)
 
 __all__ = ["svd_viewer"]
 
@@ -84,8 +91,8 @@ def _build():
             # Variance explained: singular values are variances, so the cumulative fraction is
             # the natural "how many components do I need" curve.
             self._var_plot = self._glw.addPlot(row=0, col=1)
-            self._var_plot.setLabel("bottom", "component")
-            self._var_plot.setLabel("left", "cumulative variance explained", units="%")
+            self._var_plot.setLabel("bottom", "Component")
+            self._var_plot.setLabel("left", "Cumulative variance explained (%)")
             self._var_plot.showGrid(x=True, y=True, alpha=0.2)
             cumulative = 100.0 * np.cumsum(self._sv[: self._n_comp]) / self._total_variance
             self._var_plot.plot(np.arange(1, self._n_comp + 1), cumulative, pen=pg.mkPen("w"))
@@ -93,15 +100,15 @@ def _build():
             self._var_plot.addItem(self._var_marker)
 
             self._trace_plot = self._glw.addPlot(row=1, col=0, colspan=2)
-            self._trace_plot.setLabel("bottom", "time", units="s")
-            self._trace_plot.setLabel("left", "amplitude")
+            self._trace_plot.setLabel("bottom", "Time (s)")
+            self._trace_plot.setLabel("left", "Amplitude")
             self._trace_plot.showGrid(x=True, y=True, alpha=0.2)
             self._trace_curve = self._trace_plot.plot(pen=pg.mkPen("w"))
             self._trace_extra = self._trace_plot.plot(pen=pg.mkPen((255, 128, 0), width=1))
 
             self._spec_plot = self._glw.addPlot(row=2, col=0, colspan=2)
-            self._spec_plot.setLabel("bottom", "frequency", units="Hz")
-            self._spec_plot.setLabel("left", "power")
+            self._spec_plot.setLabel("bottom", "Frequency (Hz)")
+            self._spec_plot.setLabel("left", "Power")
             self._spec_plot.setLogMode(x=True, y=True)
             self._spec_plot.showGrid(x=True, y=True, alpha=0.2)
             self._spec_curve = self._spec_plot.plot(pen=pg.mkPen("c"))
@@ -114,7 +121,7 @@ def _build():
             layout.addWidget(self._status)
             hint = QtWidgets.QLabel(
                 "left/right: component · click variance plot: jump · p or click map: pixel mode · "
-                "-/=: colour scale · alt+arrows: rotate/flip · z: reset zoom"
+                "-/=: color scale · alt+arrows: rotate/flip · z: reset zoom"
             )
             hint.setStyleSheet("color: gray;")
             hint.setWordWrap(True)
@@ -122,6 +129,8 @@ def _build():
 
             self._glw.scene().sigMouseClicked.connect(self._on_click)
             self.setFocusPolicy(QtCore.Qt.StrongFocus)
+            # Keys work from anywhere in the window, not only while this widget has focus.
+            install_hotkeys(self, self._handle_key)
 
         # ---------------------------------------------------------------- interaction
 
@@ -140,7 +149,13 @@ def _build():
                 self.set_component(int(round(x)) - 1)
 
         def keyPressEvent(self, event):
-            key, mods = event.key(), event.modifiers()
+            # text_entry_focused: a cutoff box that ignores a key lets it propagate here,
+            # where acting on it would fire hotkeys while the user is typing a number.
+            if text_entry_focused(self) or not self._handle_key(event.key(), event.modifiers()):
+                super().keyPressEvent(event)
+
+        def _handle_key(self, key, mods) -> bool:
+            """Act on a hotkey; True if consumed. See install_hotkeys."""
 
             if mods & QtCore.Qt.AltModifier:
                 if key == QtCore.Qt.Key_Right:
@@ -150,9 +165,9 @@ def _build():
                 elif key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
                     self._orient.toggle_flip()
                 else:
-                    return super().keyPressEvent(event)
+                    return False
                 self._refresh(full=True)
-                return
+                return True
 
             if key == QtCore.Qt.Key_Right:
                 self.set_component(self._index + 1)
@@ -171,7 +186,8 @@ def _build():
                 self._trace_plot.enableAutoRange()
                 self._spec_plot.enableAutoRange()
             else:
-                super().keyPressEvent(event)
+                return False
+            return True
 
         # ---------------------------------------------------------------- rendering
 
@@ -207,13 +223,13 @@ def _build():
                 self._trace_curve.setData(self._time, full_trace)
                 self._trace_extra.setData(self._time, partial)
                 self._trace_extra.setVisible(True)
-                self._trace_plot.setLabel("left", f"pixel ({y}, {x})")
+                self._trace_plot.setLabel("left", f"Pixel ({y}, {x})")
                 freq, spec = self._power_spectrum(full_trace)
             else:
                 trace = np.asarray(self._v[k], dtype=float)
                 self._trace_curve.setData(self._time, trace)
                 self._trace_extra.setVisible(False)
-                self._trace_plot.setLabel("left", f"V[{k}]")
+                self._trace_plot.setLabel("left", f"V[{k}] amplitude")
                 freq, spec = self._power_spectrum(trace)
             self._spec_curve.setData(freq, spec)
 

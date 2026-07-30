@@ -26,7 +26,7 @@ Submodules
 ``io``          reading sessions off the lab server
 ``signals``     Schmitt-trigger threshold crossings for sync traces
 ``utils``       small helpers (nearest-point matching)
-``colormaps``   the MATLAB viewers' colour tables
+``colormaps``   the MATLAB viewers' color tables
 ``gui``         the interactive viewers (needs the ``[gui]`` extra)
 
 ``widefield.gui`` is *not* imported here, so importing this package never pulls in Qt.

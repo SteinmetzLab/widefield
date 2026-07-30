@@ -2,7 +2,7 @@
 
 Widefield activity is signed (dF/F above and below baseline), so the viewers use diverging
 maps with a hard zero anchor — ``blueblackred`` in particular puts black at zero, which reads
-as "no change" far better than a mid-grey does. Keeping the exact tables means a Python figure
+as "no change" far better than a mid-gray does. Keeping the exact tables means a Python figure
 is directly comparable to a MATLAB one from the same data.
 
 Arrays are ``(N, 3)`` float64 in [0, 1]. The matplotlib and pyqtgraph converters import their
@@ -72,10 +72,10 @@ def blue_white_red(n: int = 100, gamma: float = 0.6) -> np.ndarray:
 
 
 def copper(m: int = 64) -> np.ndarray:
-    """MATLAB's ``copper(m)``, used for the tuning viewer's per-condition line colours.
+    """MATLAB's ``copper(m)``, used for the tuning viewer's per-condition line colors.
 
     Reimplemented rather than taken from matplotlib: matplotlib's ``copper`` uses different
-    channel scalings, so the condition colours would not match a MATLAB figure.
+    channel scalings, so the condition colors would not match a MATLAB figure.
     """
     if m < 1:
         raise ValueError("m must be >= 1")
@@ -84,7 +84,7 @@ def copper(m: int = 64) -> np.ndarray:
 
 
 def condition_colors(n_conditions: int) -> np.ndarray:
-    """Line colours for ``n_conditions`` tuning-curve traces.
+    """Line colors for ``n_conditions`` tuning-curve traces.
 
     ``pixelTuningCurveViewerSVD`` uses ``copper(n)`` with its channels reversed
     (``colors(:, [3 2 1])``), turning the copper ramp into a black→pale-blue one.

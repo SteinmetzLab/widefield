@@ -1,9 +1,9 @@
-"""Behavioural tests for the three viewers.
+"""Behavioral tests for the three viewers.
 
-Run headless (``QT_QPA_PLATFORM=offscreen``, set in conftest). These check *behaviour* — that a
+Run headless (``QT_QPA_PLATFORM=offscreen``, set in conftest). These check *behavior* — that a
 key or click changes the state it is supposed to, and that what is displayed matches what the
 numerics say — rather than pixels. Where a viewer computes something the pure-numpy layer also
-computes, the two are cross-checked, so a GUI regression can't quietly diverge from the maths.
+computes, the two are cross-checked, so a GUI regression can't quietly diverge from the math.
 """
 
 from __future__ import annotations
@@ -104,15 +104,15 @@ def test_corr_arrows_clamp_at_the_border(corr_viewer):
     assert corr_viewer.pixel == (0, 0)
 
 
-def test_corr_v_key_toggles_variance_normalisation(corr_viewer, movie_data):
+def test_corr_v_key_toggles_variance_normalization(corr_viewer, movie_data):
     u, v, _ = movie_data
     corr_viewer.set_pixel(5, 5)
     true_corr = corr_viewer.correlation_map.copy()
     press(corr_viewer, QtCore.Qt.Key_V)
-    normalised = corr_viewer.correlation_map
-    assert not np.allclose(true_corr, normalised)
+    normalized = corr_viewer.correlation_map
+    assert not np.allclose(true_corr, normalized)
     expected = SeedCorrelation(u, v, dtype=np.float32).map((5, 5), normalize_by_max=True)
-    np.testing.assert_allclose(normalised, expected, atol=1e-6)
+    np.testing.assert_allclose(normalized, expected, atol=1e-6)
     press(corr_viewer, QtCore.Qt.Key_V)
     np.testing.assert_allclose(corr_viewer.correlation_map, true_corr, atol=1e-9)
 
@@ -143,7 +143,7 @@ def test_corr_r_resets_orientation(corr_viewer):
 
 
 def test_corr_arrows_stay_screen_relative_after_rotation(corr_viewer):
-    """The MATLAB remaps arrow keys when rotated; we must match that behaviour."""
+    """The MATLAB remaps arrow keys when rotated; we must match that behavior."""
     corr_viewer.set_pixel(8, 5)
     press(corr_viewer, QtCore.Qt.Key_Right, QtCore.Qt.AltModifier)
     before = corr_viewer._orient.to_display(*corr_viewer.pixel, corr_viewer.shape)
@@ -281,7 +281,7 @@ def test_tuning_caxis_keys_scale_symmetrically(tuning_viewer):
     np.testing.assert_allclose(tuning_viewer._cax, [-0.9375, 0.9375])
 
 
-def test_tuning_caxis_stays_centred_on_zero(tuning_viewer):
+def test_tuning_caxis_stays_centerd_on_zero(tuning_viewer):
     for _ in range(4):
         press(tuning_viewer, QtCore.Qt.Key_Minus)
     assert tuning_viewer._cax[0] == pytest.approx(-tuning_viewer._cax[1])
@@ -511,8 +511,8 @@ def test_movie_each_pixel_gets_a_curve(movie_viewer):
     assert len(movie_viewer._trace_curves[-1]) == len(movie_viewer.pixels) == 3
 
 
-def test_movie_pixel_colours_cycle_after_five(movie_viewer):
-    """MATLAB cycles through 5 colours even though 7 are defined."""
+def test_movie_pixel_colors_cycle_after_five(movie_viewer):
+    """MATLAB cycles through 5 colors even though 7 are defined."""
     from widefield.gui.movie_with_traces import _N_CYCLE, _PIXEL_COLORS
 
     assert _N_CYCLE == 5
@@ -645,7 +645,7 @@ def test_polygon_mask_fills_a_square():
     mask = polygon_mask(np.array([[2, 2], [6, 2], [6, 6], [2, 6]]), (10, 10))
     assert mask[3, 3] and mask[5, 5]
     assert not mask[0, 0] and not mask[9, 9]
-    assert mask.sum() == 16  # pixel centres 2.5..5.5 in both axes
+    assert mask.sum() == 16  # pixel centers 2.5..5.5 in both axes
 
 
 def test_polygon_mask_handles_a_triangle():

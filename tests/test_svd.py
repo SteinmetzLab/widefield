@@ -1,4 +1,4 @@
-"""Validate widefield.svd against the MATLAB golden reference, plus behavioural edge cases."""
+"""Validate widefield.svd against the MATLAB golden reference, plus behavioral edge cases."""
 
 from __future__ import annotations
 

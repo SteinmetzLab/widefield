@@ -16,7 +16,7 @@ Pure numpy/scipy — no Qt, so this stays importable on a headless machine.
 from __future__ import annotations
 
 import numpy as np
-from scipy.signal import butter, detrend, filtfilt, lfilter
+from scipy.signal import butter, detrend, filtfilt, lfilter, sosfiltfilt
 
 __all__ = [
     "flatten_u",
@@ -25,6 +25,7 @@ __all__ = [
     "change_u",
     "dff_from_svd",
     "hp_filt",
+    "bandpass_filt",
     "detrend_and_filt",
     "subsample_shift",
     "bin_image",
@@ -137,7 +138,7 @@ def change_u(u: np.ndarray, v: np.ndarray, new_u: np.ndarray) -> np.ndarray:
 def dff_from_svd(
     u: np.ndarray, v: np.ndarray, mean_image: np.ndarray, soft_norm: float | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Soft-normalised dF/F, kept in the original ``U`` basis. Port of ``dffFromSVD.m``.
+    """Soft-normalized dF/F, kept in the original ``U`` basis. Port of ``dffFromSVD.m``.
 
     Dividing each pixel by (mean + soft) breaks orthonormality of ``U``, so the result is
     re-cast into the original basis via :func:`change_u`; only ``V`` changes.
@@ -192,6 +193,70 @@ def hp_filt(v: np.ndarray, fs: float, cutoff_freq: float = 0.01) -> np.ndarray:
     v = np.asarray(v)
     b, a = butter(3, cutoff_freq / (fs / 2), btype="high")
     return _matlab_filtfilt(b, a, v.astype(np.float64), axis=-1).astype(np.float32)
+
+
+def bandpass_filt(
+    v: np.ndarray,
+    fs: float,
+    highpass: float | None = None,
+    lowpass: float | None = None,
+    order: int = 3,
+) -> np.ndarray:
+    """Zero-phase Butterworth band-pass / high-pass / low-pass of the temporal components.
+
+    Filtering ``V`` filters every pixel, because reconstruction ``U @ V`` is linear in time — so
+    this costs a filter over an ``(nSV, nFrames)`` array instead of the whole movie.
+
+    Parameters
+    ----------
+    v : (nSV, nFrames)
+    fs : frame rate in Hz.
+    highpass : lower cutoff. ``None``, 0, or negative means no high-pass.
+    lowpass : upper cutoff. ``None``, ``inf``, or >= Nyquist means no low-pass.
+    order : Butterworth order (per direction).
+
+    Returns
+    -------
+    Filtered ``V``, same shape and dtype-promoted to float64. With neither cutoff set, a copy of
+    the input.
+
+    Notes
+    -----
+    Zero-phase (``filtfilt``), unlike :func:`detrend_and_filt`: a viewer must not introduce a lag
+    between the movie and the behavioral traces beside it, and there is no causality requirement
+    when you already have the whole recording.
+
+    Uses second-order-sections rather than transfer-function coefficients. At the cutoffs that
+    matter here — 0.01 Hz against a 35 Hz frame rate is a normalized frequency of 6e-4 — a
+    ``b, a`` representation of a 3rd-order filter loses so much precision that the output can
+    diverge, while SOS stays stable.
+    """
+    v = np.asarray(v, dtype=np.float64)
+    if v.ndim != 2:
+        raise ValueError(f"V must be (nSV, nFrames); got shape {v.shape}")
+    nyquist = fs / 2.0
+
+    hp = None if highpass is None or highpass <= 0 else float(highpass)
+    lp = (
+        None
+        if lowpass is None or not np.isfinite(lowpass) or lowpass >= nyquist
+        else float(lowpass)
+    )
+
+    if hp is None and lp is None:
+        return v.copy()
+    if hp is not None and hp >= nyquist:
+        raise ValueError(f"highpass {hp} Hz is at or above Nyquist ({nyquist} Hz)")
+    if hp is not None and lp is not None and hp >= lp:
+        raise ValueError(f"highpass {hp} Hz must be below lowpass {lp} Hz")
+
+    if hp is not None and lp is not None:
+        sos = butter(order, [hp / nyquist, lp / nyquist], btype="bandpass", output="sos")
+    elif hp is not None:
+        sos = butter(order, hp / nyquist, btype="highpass", output="sos")
+    else:
+        sos = butter(order, lp / nyquist, btype="lowpass", output="sos")
+    return sosfiltfilt(sos, v, axis=-1)
 
 
 def detrend_and_filt(v: np.ndarray, fs: float) -> np.ndarray:
@@ -260,9 +325,9 @@ def bin_image(image: np.ndarray, bin_factor: int) -> np.ndarray:
 
     * ``B = 2`` — that window *is* the block ``[i, i+1]``, so binning by 2 does coincide with
       a block mean. This is a coincidence of the offset, not the general rule.
-    * ``B >= 4`` — the window straddles the neighbouring blocks (for ``B = 4`` it spans
+    * ``B >= 4`` — the window straddles the neighboring blocks (for ``B = 4`` it spans
       ``[i-1, i+2]``), so results differ substantially from a block mean, and out-of-range
-      samples are treated as **zero** rather than renormalised, which biases the first and
+      samples are treated as **zero** rather than renormalized, which biases the first and
       last row/column low. On the reference image ``B = 4`` gives 7.875 where a block mean
       gives 20.5.
 

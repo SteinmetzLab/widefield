@@ -8,7 +8,7 @@ MATLAB parity
 ============================  ==========================================================
 click                          set the seed pixel
 arrow keys                     move the seed 5 px (1 px with Ctrl)
-``v``                          toggle variance normalisation (emphasise strong-signal areas)
+``v``                          toggle variance normalization (emphasize strong-signal areas)
 ``h``                          toggle hover mode (recompute continuously under the cursor)
 alt + left/right               rotate the image 90 degrees
 alt + up/down                  flip vertically
@@ -24,7 +24,14 @@ import numpy as np
 
 from widefield.colormaps import blueblackred, to_pyqtgraph
 from widefield.correlation import SeedCorrelation
-from widefield.gui._common import Orientation, ensure_app, require_qt, run_app
+from widefield.gui._common import (
+    Orientation,
+    ensure_app,
+    install_hotkeys,
+    require_qt,
+    run_app,
+    text_entry_focused,
+)
 from widefield.svd import pixel_timecourse
 
 # PixelCorrelationViewer is served by the module __getattr__ below (it cannot be defined at
@@ -98,8 +105,8 @@ def _build():
             self._trace_plot = self._glw.addPlot(row=1, col=0)
             self._trace_plot.setMaximumHeight(130)
             self._trace_plot.showGrid(x=True, y=True, alpha=0.2)
-            self._trace_plot.setLabel("bottom", "time", units="s" if self._t is not None else None)
-            self._trace_plot.setLabel("left", "activity")
+            self._trace_plot.setLabel("bottom", "Time (s)" if self._t is not None else "Frame")
+            self._trace_plot.setLabel("left", "Activity")
             self._trace_curve = self._trace_plot.plot(pen=pg.mkPen((0, 204, 0), width=1))
 
             self._status = QtWidgets.QLabel()
@@ -117,6 +124,9 @@ def _build():
             self._image.scene().sigMouseClicked.connect(self._on_click)
             self._plot.scene().sigMouseMoved.connect(self._on_move)
             self.setFocusPolicy(QtCore.Qt.StrongFocus)
+            # Route keys from anywhere in the window to _handle_key, not only while this
+            # widget holds focus (clicking the image hands focus to the pyqtgraph view).
+            install_hotkeys(self, self._handle_key)
 
         # ---------------------------------------------------------------- interaction
 
@@ -147,8 +157,17 @@ def _build():
                 self._update_status(cursor=pixel)
 
         def keyPressEvent(self, event):
-            key = event.key()
-            mods = event.modifiers()
+            # text_entry_focused: a cutoff box that ignores a key lets it propagate here,
+            # where acting on it would fire hotkeys while the user is typing a number.
+            if text_entry_focused(self) or not self._handle_key(event.key(), event.modifiers()):
+                super().keyPressEvent(event)
+
+        def _handle_key(self, key, mods) -> bool:
+            """Act on a hotkey; True if consumed.
+
+            Split out of keyPressEvent so install_hotkeys can route key presses that Qt
+            delivered to a child widget.
+            """
             alt = bool(mods & QtCore.Qt.AltModifier)
             step = 1 if mods & QtCore.Qt.ControlModifier else _STEP
 
@@ -160,9 +179,9 @@ def _build():
                 elif key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
                     self._orient.toggle_flip()
                 else:
-                    return super().keyPressEvent(event)
+                    return False
                 self._refresh(full=True)
-                return
+                return True
 
             moves = {
                 QtCore.Qt.Key_Up: (-step, 0),
@@ -186,7 +205,8 @@ def _build():
             elif key == QtCore.Qt.Key_S:
                 self._save_map()
             else:
-                super().keyPressEvent(event)
+                return False
+            return True
 
         # ---------------------------------------------------------------- rendering
 
@@ -196,14 +216,14 @@ def _build():
                 self._orient.apply(self._map), autoLevels=False, levels=self._levels()
             )
             dy, dx = self._orient.to_display(*self._pixel, self.shape)
-            self._marker.setData([dx + 0.5], [dy + 0.5])  # centre of the pixel
+            self._marker.setData([dx + 0.5], [dy + 0.5])  # center of the pixel
             self._update_trace()
             self._update_status()
             if full:
                 self._plot.vb.autoRange()
 
         def _levels(self):
-            """Correlations use a fixed [-1, 1]; the variance-normalised map is much flatter.
+            """Correlations use a fixed [-1, 1]; the variance-normalized map is much flatter.
 
             Autoscaling the latter symmetrically about zero keeps it readable — otherwise it
             renders as a nearly uniform black field, which is what the MATLAB does show.
@@ -228,7 +248,7 @@ def _build():
                 cy, cx = cursor
                 bits.append(f"cursor ({cy}, {cx}) r = {self._map[cy, cx]:+.3f}")
             bits.append(
-                "normalised by max variance" if self._normalize_by_max else "true correlation"
+                "normalized by max variance" if self._normalize_by_max else "true correlation"
             )
             if self._hover:
                 bits.append("HOVER ON")

@@ -159,7 +159,7 @@ def hemo_correct_local(
     denom = np.einsum("pt,pt->p", pix_aux, pix_aux)
     with np.errstate(divide="ignore", invalid="ignore"):
         scale = np.where(denom > 0, numer / denom, 0.0)
-    # Zero out pixels with no auxiliary signal at all (outside the ROI, or artefacts).
+    # Zero out pixels with no auxiliary signal at all (outside the ROI, or artifacts).
     scale = np.nan_to_num(scale, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Lift the per-pixel gains into a V-space transform.

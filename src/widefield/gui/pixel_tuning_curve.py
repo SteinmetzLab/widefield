@@ -19,7 +19,7 @@ scroll wheel                 step time
 ``j`` / ``l``                move pixel left / right 5 px
 ``p``                        play / pause the movie of the selected condition
 ``f`` / ``s``                faster / slower playback
-``-`` / ``=``                shrink / grow the colour scale (and the y-limits with it)
+``-`` / ``=``                shrink / grow the color scale (and the y-limits with it)
 alt + left/right             rotate 90 degrees
 alt + up/down                flip vertically
 ``r``                        draw an ROI; traces become the ROI mean
@@ -40,9 +40,11 @@ from widefield.events import event_locked_avg_svd
 from widefield.gui._common import (
     Orientation,
     ensure_app,
+    install_hotkeys,
     polygon_mask,
     require_qt,
     run_app,
+    text_entry_focused,
 )
 from widefield.svd import flatten_u
 
@@ -145,8 +147,8 @@ def _build():
 
             # Traces: one line per condition, plus markers for t=0 and the selected time.
             self._trace_plot = self._glw.addPlot(row=0, col=2)
-            self._trace_plot.setLabel("bottom", "time from event", units="s")
-            self._trace_plot.setLabel("left", "activity")
+            self._trace_plot.setLabel("bottom", "Time from event (s)")
+            self._trace_plot.setLabel("left", "Activity")
             self._trace_plot.showGrid(x=True, y=True, alpha=0.2)
             self._trace_curves = [
                 self._trace_plot.plot(pen=pg.mkPen(tuple((c * 255).astype(int)), width=1))
@@ -161,8 +163,8 @@ def _build():
 
             # Tuning curve.
             self._tc_plot = self._glw.addPlot(row=0, col=3)
-            self._tc_plot.setLabel("bottom", "condition")
-            self._tc_plot.setLabel("left", "activity")
+            self._tc_plot.setLabel("bottom", "Condition")
+            self._tc_plot.setLabel("left", "Activity")
             self._tc_plot.showGrid(x=True, y=True, alpha=0.2)
             self._tc_curve = self._tc_plot.plot(
                 pen=pg.mkPen("k", width=1), symbol="o", symbolSize=6, symbolBrush="k"
@@ -185,7 +187,7 @@ def _build():
             layout.addWidget(self._status)
             hint = QtWidgets.QLabel(
                 "click any panel · arrows: time/condition · wheel: time · ijkl: pixel · "
-                "p: play · f/s: speed · -/=: colour scale · alt+arrows: rotate/flip · r: ROI"
+                "p: play · f/s: speed · -/=: color scale · alt+arrows: rotate/flip · r: ROI"
             )
             hint.setStyleSheet("color: gray;")
             hint.setWordWrap(True)
@@ -193,6 +195,8 @@ def _build():
 
             self._image.scene().sigMouseClicked.connect(self._on_scene_click)
             self.setFocusPolicy(QtCore.Qt.StrongFocus)
+            # Keys work from anywhere in the window, not only while this widget has focus.
+            install_hotkeys(self, self._handle_key)
 
         # ---------------------------------------------------------------- computation
 
@@ -244,7 +248,13 @@ def _build():
             self._refresh_all()
 
         def keyPressEvent(self, event):
-            key, mods = event.key(), event.modifiers()
+            # text_entry_focused: a cutoff box that ignores a key lets it propagate here,
+            # where acting on it would fire hotkeys while the user is typing a number.
+            if text_entry_focused(self) or not self._handle_key(event.key(), event.modifiers()):
+                super().keyPressEvent(event)
+
+        def _handle_key(self, key, mods) -> bool:
+            """Act on a hotkey; True if consumed. See install_hotkeys."""
 
             if mods & QtCore.Qt.AltModifier:
                 if key == QtCore.Qt.Key_Right:
@@ -254,10 +264,10 @@ def _build():
                 elif key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
                     self._orient.toggle_flip()
                 else:
-                    return super().keyPressEvent(event)
+                    return False
                 self._refresh_all()
                 self._plot.vb.autoRange()
-                return
+                return True
 
             if key == QtCore.Qt.Key_Right:
                 self._step_time(1)
@@ -299,7 +309,8 @@ def _build():
             elif key == QtCore.Qt.Key_R:
                 self.toggle_roi()
             else:
-                super().keyPressEvent(event)
+                return False
+            return True
 
         def toggle_play(self) -> None:
             self._playing = not self._playing

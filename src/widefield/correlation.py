@@ -19,7 +19,7 @@ __all__ = ["SeedCorrelation", "correlation_map_raw"]
 
 # Rows of Ur processed per chunk when accumulating per-pixel variance. Ur @ cov_v is the same
 # size as Ur (nPix x nSV), which at full resolution is several GB in float64 — so it is never
-# materialised whole. 65536 rows x 2000 components x 4 bytes is ~500 MB worst case; measured on
+# materialized whole. 65536 rows x 2000 components x 4 bytes is ~500 MB worst case; measured on
 # a real 512x512 session this is ~20% faster than 8192 (fewer, larger GEMMs) and 40% faster
 # than doing it in one shot.
 _VAR_CHUNK = 65536
@@ -61,12 +61,12 @@ class SeedCorrelation:
 
         # copy=False: U off disk is already float32, so the common case is a free view.
         self.ur = flatten_u(u[..., :nsv]).astype(self.dtype, copy=False)
-        # cov(V') in MATLAB — normalised by (nFrames - 1).
+        # cov(V') in MATLAB — normalized by (nFrames - 1).
         self.cov_v = np.atleast_2d(np.cov(np.asarray(v[:nsv], dtype=np.float64))).astype(
             self.dtype, copy=False
         )
         self.var_p = self._per_pixel_variance()
-        # Precompute the normalisation once. Each map is otherwise dominated by streaming Ur
+        # Precompute the normalization once. Each map is otherwise dominated by streaming Ur
         # (210 MB for a 512x512 x 200 session), so per-call sqrt/where passes over nPix are pure
         # overhead on top of a memory-bandwidth-bound GEMV. Dead pixels (zero variance) get an
         # inverse std of 0, which makes their correlation 0 rather than NaN without a `where`.

@@ -17,16 +17,25 @@ from dataclasses import dataclass
 
 import numpy as np
 
-__all__ = ["Orientation", "polygon_mask", "require_qt", "ensure_app", "run_app", "clamp"]
+__all__ = [
+    "Orientation",
+    "polygon_mask",
+    "require_qt",
+    "ensure_app",
+    "run_app",
+    "clamp",
+    "install_hotkeys",
+    "text_entry_focused",
+]
 
 
 def polygon_mask(vertices: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     """Boolean mask of the pixels inside a polygon. Equivalent to MATLAB's ``roipoly``.
 
     ``vertices`` is ``(N, 2)`` as ``(x, y)`` in pixel coordinates; ``shape`` is ``(Ypix, Xpix)``.
-    A pixel is inside if its *centre* is, by the even-odd rule.
+    A pixel is inside if its *center* is, by the even-odd rule.
 
-    Implemented with a vectorised ray cast rather than via matplotlib or scikit-image: it keeps
+    Implemented with a vectorized ray cast rather than via matplotlib or scikit-image: it keeps
     the ROI feature inside the base install, and it is fast enough (one pass per edge over the
     whole image — a few ms at 512x512).
     """
@@ -133,7 +142,7 @@ class Orientation:
 
         ``d_row``/``d_col`` are in display space (``d_row = +1`` is one pixel down the screen),
         so arrow keys behave the same whatever the rotation — the MATLAB's key-remapping
-        behaviour, without the key remapping.
+        behavior, without the key remapping.
         """
         dh, dw = self.display_shape(shape)
         dy, dx = self.to_display(y, x, shape)
@@ -158,6 +167,67 @@ def require_qt():
     # numpy's (row, col) is (y, x); without this pyqtgraph transposes every image.
     pg.setConfigOptions(imageAxisOrder="row-major")
     return pg, QtCore, QtGui, QtWidgets
+
+
+def text_entry_focused(widget) -> bool:
+    """True if a text-entry descendant of ``widget`` currently holds focus.
+
+    Both key-delivery paths need this guard. :func:`install_hotkeys` consults it, but a text
+    entry that *ignores* a key (a digit box handed ``p``, or any key at all while the window is
+    not activated) lets Qt propagate the event up to the container and call its ``keyPressEvent``
+    directly — so the container's own handler has to check as well, or typing in a cutoff box
+    fires the hotkeys anyway.
+
+    Uses ``widget.focusWidget()`` rather than ``QApplication.focusWidget()``: the latter is
+    ``None`` whenever the window is not activated.
+    """
+    _pg, _QtCore, _QtGui, QtWidgets = require_qt()
+    focused = widget.focusWidget()
+    return isinstance(
+        focused, (QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox, QtWidgets.QTextEdit)
+    )
+
+
+def install_hotkeys(widget, handler):
+    """Route key presses anywhere inside ``widget`` to ``handler(key, modifiers) -> bool``.
+
+    Without this, hotkeys only work while the top-level widget happens to hold focus. Clicking
+    the image gives focus to the pyqtgraph view, clicking Play gives it to the button, and both
+    swallow keys before they reach the container — so ``-``/``=`` would appear to work only right
+    after touching a button, which is exactly the bug this fixes.
+
+    One filter instance is installed on ``widget`` and on each descendant widget that exists at
+    call time. It is deliberately *not* installed on the ``QApplication``: an app-wide filter is
+    invoked for every event delivered to any object, and each invocation crosses the C++/Python
+    boundary. With several viewers open that turned widget construction from ~0.1 s into ~3.5 s,
+    because every filter saw every other widget's paint and layout events.
+
+    Text-entry widgets are skipped, or typing "0.5" into a cutoff box would trigger whatever
+    ``-`` and ``=`` are bound to.
+
+    Returns the filter object; it is parented to ``widget``, so it lives exactly as long as the
+    viewer and needs no manual cleanup.
+    """
+    _pg, QtCore, _QtGui, QtWidgets = require_qt()
+
+    text_entry = (QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox, QtWidgets.QTextEdit)
+
+    class _HotkeyFilter(QtCore.QObject):
+        def eventFilter(self, obj, event):
+            if event.type() != QtCore.QEvent.Type.KeyPress:
+                return False
+            if isinstance(obj, text_entry) or text_entry_focused(widget):
+                return False
+            if handler(event.key(), event.modifiers()):
+                event.accept()
+                return True  # consumed: don't let a slider also act on the arrow key
+            return False
+
+    filt = _HotkeyFilter(widget)
+    widget.installEventFilter(filt)
+    for child in widget.findChildren(QtWidgets.QWidget):
+        child.installEventFilter(filt)
+    return filt
 
 
 def ensure_app():

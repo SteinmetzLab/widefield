@@ -58,7 +58,7 @@ def test_core_module_imports_without_qt(no_qt, module):
 
 
 def test_numerics_actually_run_without_qt(no_qt):
-    """Importing is not enough — the maths must work too."""
+    """Importing is not enough — the math must work too."""
     wf = importlib.import_module("widefield")
     rng = np.random.default_rng(0)
     u = rng.standard_normal((6, 5, 4))

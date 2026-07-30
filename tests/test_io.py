@@ -84,7 +84,7 @@ def test_read_u_full_matches_plain_load(synthetic_session):
 
 
 def test_read_u_prefix_is_the_leading_components(synthetic_session):
-    """The whole optimisation: reading n components must equal loading all and slicing."""
+    """The whole optimization: reading n components must equal loading all and slicing."""
     ch = discover_channels(synthetic_session)["blue"]
     full = np.load(ch.spatial)
     got = read_u_from_npy(ch.spatial, 3)
