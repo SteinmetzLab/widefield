@@ -36,9 +36,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 
@@ -300,7 +301,10 @@ def _cache_path(src: Path, tag: str) -> Path:
     """Cache filename keyed on the source's identity *and* size+mtime, so stale data misses."""
     st = src.stat()
     key = f"{src.resolve()}|{st.st_size}|{int(st.st_mtime)}|{tag}|v{_CACHE_FORMAT}"
-    return cache_dir() / f"{src.stem}.{tag}.v{_CACHE_FORMAT}.{hashlib.sha1(key.encode()).hexdigest()[:16]}.npy"
+    return (
+        cache_dir()
+        / f"{src.stem}.{tag}.v{_CACHE_FORMAT}.{hashlib.sha1(key.encode()).hexdigest()[:16]}.npy"
+    )
 
 
 def _cached(src: Path, tag: str, build: Callable[[], np.ndarray], use_cache: bool) -> np.ndarray:
@@ -368,7 +372,10 @@ def load_uvt(
 
     u = _cached(ch.spatial, f"U.n{want}.b{binning}", build_u, use_cache)
     v = _cached(
-        ch.temporal, f"V.n{want}", lambda: read_v_from_npy(ch.temporal, want, should_cancel), use_cache
+        ch.temporal,
+        f"V.n{want}",
+        lambda: read_v_from_npy(ch.temporal, want, should_cancel),
+        use_cache,
     )
 
     t = None

@@ -32,9 +32,7 @@ def ref() -> dict:
     """
     scipy_io = pytest.importorskip("scipy.io")
     if not REFERENCE_MAT.exists():
-        pytest.skip(
-            f"{REFERENCE_MAT} missing — regenerate with tests/matlab_ref/gen_reference.m"
-        )
+        pytest.skip(f"{REFERENCE_MAT} missing — regenerate with tests/matlab_ref/gen_reference.m")
     raw = scipy_io.loadmat(str(REFERENCE_MAT))
     out = {k: v for k, v in raw.items() if not k.startswith("__")}
 

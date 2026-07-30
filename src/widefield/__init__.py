@@ -21,8 +21,11 @@ Submodules
 ``svd``         reconstruction, basis changes, dF/F, temporal filters, spatial binning
 ``events``      event-locked (peri-stimulus) averaging in V space
 ``correlation`` seed-pixel correlation maps straight from the SVD
+``hemo``        hemodynamic correction from an interleaved reflectance channel
+``compress``    SVD-compressing a raw movie too large for RAM
 ``io``          reading sessions off the lab server
 ``signals``     Schmitt-trigger threshold crossings for sync traces
+``utils``       small helpers (nearest-point matching)
 ``colormaps``   the MATLAB viewers' colour tables
 ``gui``         the interactive viewers (needs the ``[gui]`` extra)
 
@@ -31,6 +34,7 @@ Submodules
 
 from __future__ import annotations
 
+from widefield.compress import SVDResult, iter_raw_frames, svd_compress
 from widefield.correlation import SeedCorrelation, correlation_map_raw
 from widefield.events import (
     EventLockedAvg,
@@ -38,6 +42,12 @@ from widefield.events import (
     peri_event_series,
     peri_event_window,
     tuning_by_condition,
+)
+from widefield.hemo import (
+    HemoCorrection,
+    hemo_correct_local,
+    hemo_correct_nonlocal,
+    variance_explained,
 )
 from widefield.io import UVData, discover_channels, load_uvt
 from widefield.signals import schmitt, schmitt_times
@@ -52,6 +62,7 @@ from widefield.svd import (
     subsample_shift,
     svd_frame_reconstruct,
 )
+from widefield.utils import find_nearest_point
 
 __version__ = "0.1.0"
 
@@ -76,6 +87,15 @@ __all__ = [
     # correlation
     "SeedCorrelation",
     "correlation_map_raw",
+    # hemodynamic correction
+    "hemo_correct_local",
+    "hemo_correct_nonlocal",
+    "HemoCorrection",
+    "variance_explained",
+    # compression
+    "svd_compress",
+    "SVDResult",
+    "iter_raw_frames",
     # io
     "load_uvt",
     "discover_channels",
@@ -83,4 +103,6 @@ __all__ = [
     # signals
     "schmitt",
     "schmitt_times",
+    # utils
+    "find_nearest_point",
 ]

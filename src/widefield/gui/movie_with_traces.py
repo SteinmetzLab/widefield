@@ -77,7 +77,9 @@ class Trace:
         self.t = np.asarray(self.t, dtype=float).ravel()
         self.v = np.asarray(self.v, dtype=float).ravel()
         if self.t.size != self.v.size:
-            raise ValueError(f"trace {self.name!r}: t has {self.t.size} samples, v has {self.v.size}")
+            raise ValueError(
+                f"trace {self.name!r}: t has {self.t.size} samples, v has {self.v.size}"
+            )
 
 
 @dataclass
@@ -144,9 +146,7 @@ def _build():
                 else np.asarray(t, dtype=float).ravel()
             )
             if self._t.size != self._n_frames:
-                raise ValueError(
-                    f"t has {self._t.size} samples but V has {self._n_frames} frames"
-                )
+                raise ValueError(f"t has {self._t.size} samples but V has {self._n_frames} frames")
 
             nsv = min(self._u.shape[-1], self._v.shape[0])
             if nsv_display is not None:
@@ -251,9 +251,7 @@ def _build():
                     p.setLabel("bottom", "time", units="s")
                     p.setTitle("selected pixels", size="9pt")
                     self._trace_curves.append([])  # one curve per selected pixel, added lazily
-                mark = pg.InfiniteLine(
-                    pos=0, angle=90, pen=pg.mkPen("y", style=QtCore.Qt.DashLine)
-                )
+                mark = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen("y", style=QtCore.Qt.DashLine))
                 p.addItem(mark)
                 self._trace_marks.append(mark)
                 self._trace_plots.append(p)
@@ -300,7 +298,10 @@ def _build():
             for 31 frames nobody asked for.
             """
             f = self._frame
-            if self._block is not None and self._block_start <= f < self._block_start + self._block.shape[1]:
+            if (
+                self._block is not None
+                and self._block_start <= f < self._block_start + self._block.shape[1]
+            ):
                 return self._block[:, f - self._block_start].reshape(self.shape)
 
             if self._playing:
@@ -452,9 +453,7 @@ def _build():
                 plot.removeItem(curves.pop())
             while len(curves) < len(self._pixels):
                 color = _PIXEL_COLORS[len(curves) % _N_CYCLE]
-                curves.append(
-                    plot.plot(pen=pg.mkPen(tuple((color * 255).astype(int)), width=2))
-                )
+                curves.append(plot.plot(pen=pg.mkPen(tuple((color * 255).astype(int)), width=2)))
 
         def _refresh(self, full: bool = False) -> None:
             self._image.setImage(
@@ -483,7 +482,9 @@ def _build():
 
             self._rebuild_pixel_curves()
             sel = slice(*np.searchsorted(self._t, [lo, hi]))
-            for curve, pt in zip(self._trace_curves[-1], self._pixel_traces):
+            # strict: _rebuild_pixel_curves just synced the curves to self._pixels, and the
+            # traces were computed from the same list, so a length mismatch is a real bug.
+            for curve, pt in zip(self._trace_curves[-1], self._pixel_traces, strict=True):
                 curve.setData(self._t[sel], pt[sel])
             self._trace_plots[-1].setYRange(*self._cax, padding=0)
 
@@ -492,7 +493,7 @@ def _build():
                 mark.setPos(now)
 
             aux_errors = []
-            for item, aux in zip(self._aux_items, self._aux):
+            for item, aux in zip(self._aux_items, self._aux, strict=True):
                 try:
                     aux.render(item, now, aux.data)
                 except Exception as exc:  # a broken aux renderer must not kill playback

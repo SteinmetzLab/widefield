@@ -157,9 +157,7 @@ def dff_from_svd(
     flat = flatten_u(u)
     mean_flat = mean_image.reshape(-1)
     if mean_flat.size != flat.shape[0]:
-        raise ValueError(
-            f"meanImage has {mean_flat.size} pixels but U has {flat.shape[0]}"
-        )
+        raise ValueError(f"meanImage has {mean_flat.size} pixels but U has {flat.shape[0]}")
 
     if soft_norm is None:
         soft_norm = float(np.median(mean_flat))
@@ -173,6 +171,7 @@ def dff_from_svd(
 # --------------------------------------------------------------------------------------
 # temporal filtering
 # --------------------------------------------------------------------------------------
+
 
 # MATLAB's filtfilt pads by 3*(nfilt-1) with an odd reflection. scipy defaults to
 # padlen=3*max(len(a), len(b)), which is one sample longer and gives visibly different

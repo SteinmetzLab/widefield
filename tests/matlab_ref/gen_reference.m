@@ -120,6 +120,61 @@ R.schmitt_flipTimes = flipTimes;
 R.schmitt_flipUp    = flipUp;
 R.schmitt_flipDown  = flipDown;
 
+% ---------------------------------------------------------------- hemodynamic correction
+% An auxiliary "violet" channel: correlated with V in the heartbeat band plus its own noise.
+Vaux = V * 0.8 + randn(nSV, T) * 3;
+R.hemo_Vaux = Vaux;
+R.hemo_freqRange = [9 13];
+R.hemo_pixSpace  = 3;
+
+% --- HemoCorrectNonlocal: no plotting, so call it directly.
+% NB it expects nTimes x nSV (unlike HemoCorrectLocal, which transposes internally).
+[VnlOut, WtsNl] = HemoCorrectNonlocal(V', Vaux', Fs, [9 13]);
+R.hemo_nonlocal_V   = VnlOut';     % back to nSV x nTimes for the Python comparison
+R.hemo_nonlocal_Wts = WtsNl;
+
+% --- HemoCorrectLocal: mirror its numerics inline, omitting the two figures it pops
+% (a figure of the scale factors and a transformationViewerSVD window) so this script stays
+% batch-safe. Every line below is copied from HemoCorrectLocal.m.
+Vt = V'; Vauxt = Vaux';                                   % nTimes x nSV
+zV    = bsxfun(@minus, Vt,    mean(Vt));
+zVaux = bsxfun(@minus, Vauxt, mean(Vauxt));
+[bh, ah] = butter(2, R.hemo_freqRange/(Fs/2));
+fV    = filter(bh, ah, zV);
+fVaux = filter(bh, ah, zVaux);
+
+pixSpace = R.hemo_pixSpace;
+Uflat_h = reshape(U, Ypix*Xpix, []);
+[pixY, pixX] = meshgrid(1:pixSpace:Ypix, 1:pixSpace:Xpix);
+pixInd = sub2ind([Ypix, Xpix], pixY, pixX);
+Usub = Uflat_h(pixInd,:);
+
+pixTrace = fV*Usub';
+pixAux   = fVaux*Usub';
+ScaleFactor = sum(pixTrace.*pixAux) ./ sum(pixAux.*pixAux);
+ScaleFactor(isnan(ScaleFactor)) = 0;
+
+Tloc = pinv(Usub)*diag(ScaleFactor)*Usub;
+VlocOut = Vt - zVaux*Tloc';
+
+hPow = sum(fV(:).^2);
+fVcor = fV - fVaux*Tloc';
+hPowcor = sum(fVcor(:).^2);
+R.hemo_local_heartPct = 100*(hPow-hPowcor)/hPow;
+
+[b1, a1] = butter(2, .1/(Fs/2), 'high');
+f1V    = filter(b1, a1, zV);
+f1Vaux = filter(b1, a1, zVaux);
+f1Pow = sum(f1V(:).^2);
+f1Vout = f1V - f1Vaux*Tloc';
+f1Powcor = sum(f1Vout(:).^2);
+R.hemo_local_slowPct = 100*(f1Pow-f1Powcor)/f1Pow;
+
+R.hemo_local_V     = VlocOut';    % nSV x nTimes
+R.hemo_local_T     = Tloc;
+R.hemo_local_scale = ScaleFactor; % flat, in MATLAB's column-major subgrid order
+R.hemo_local_Usub  = Usub;
+
 % ---------------------------------------------------------------- colormaps
 R.cmap_blueblackred = colormap_blueblackred();      % fixed 101-entry map, no size argument
 R.cmap_redblackblue = colormap_redblackblue();

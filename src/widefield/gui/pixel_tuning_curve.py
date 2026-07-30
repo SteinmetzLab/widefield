@@ -44,7 +44,7 @@ from widefield.gui._common import (
     require_qt,
     run_app,
 )
-from widefield.svd import flatten_u, svd_frame_reconstruct
+from widefield.svd import flatten_u
 
 __all__ = ["pixel_tuning_curve_viewer"]
 
@@ -173,7 +173,8 @@ def _build():
             self._tc_plot.addItem(self._tc_marker)
             if not self._numeric_labels:
                 axis = self._tc_plot.getAxis("bottom")
-                axis.setTicks([[(x, str(c)) for x, c in zip(self._cond_x, self._conditions)]])
+                ticks = zip(self._cond_x, self._conditions, strict=True)
+                axis.setTicks([[(x, str(c)) for x, c in ticks]])
 
             self._glw.ci.layout.setColumnStretchFactor(0, 2)
             self._glw.ci.layout.setColumnStretchFactor(1, 2)
@@ -344,7 +345,10 @@ def _build():
             # Handle positions are ROI-local; add the ROI's own position to get scene/display.
             origin = self._roi.pos()
             verts = np.array(
-                [[h.pos().x() + origin.x(), h.pos().y() + origin.y()] for h in self._roi.getHandles()]
+                [
+                    [h.pos().x() + origin.x(), h.pos().y() + origin.y()]
+                    for h in self._roi.getHandles()
+                ]
             )
             display_shape = self._orient.display_shape(self.shape)
             mask_display = polygon_mask(verts, display_shape)

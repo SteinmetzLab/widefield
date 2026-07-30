@@ -11,7 +11,6 @@ import numpy as np
 import pytest
 
 from widefield.io import (
-    Channel,
     LoadCancelled,
     default_channel,
     discover_channels,
@@ -218,9 +217,9 @@ def test_cache_roundtrip(synthetic_session, tmp_path, monkeypatch):
 def test_cache_never_written_under_the_session(synthetic_session, tmp_path, monkeypatch):
     """The server is read-only; nothing may appear next to the data."""
     monkeypatch.setenv("WIDEFIELD_CACHE", str(tmp_path / "cache"))
-    before = {p for p in synthetic_session.rglob("*")}
+    before = set(synthetic_session.rglob("*"))
     load_uvt(synthetic_session, channel="blue", use_cache=True)
-    assert {p for p in synthetic_session.rglob("*")} == before
+    assert set(synthetic_session.rglob("*")) == before
 
 
 def test_cache_key_separates_binning(synthetic_session, tmp_path, monkeypatch):
@@ -244,6 +243,6 @@ def test_corrupt_cache_is_rebuilt(synthetic_session, tmp_path, monkeypatch):
     for p in (tmp_path / "cache").glob("*.npy"):
         p.write_bytes(b"garbage")
     d = load_uvt(synthetic_session, channel="blue", nsv=3, use_cache=True)  # must not raise
-    np.testing.assert_array_equal(d.u, read_u_from_npy(
-        discover_channels(synthetic_session)["blue"].spatial, 3
-    ))
+    np.testing.assert_array_equal(
+        d.u, read_u_from_npy(discover_channels(synthetic_session)["blue"].spatial, 3)
+    )

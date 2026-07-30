@@ -17,11 +17,13 @@ from __future__ import annotations
 from widefield.gui.movie_with_traces import AuxVideo, Trace, movie_with_traces
 from widefield.gui.pixel_correlation import pixel_correlation_viewer
 from widefield.gui.pixel_tuning_curve import pixel_tuning_curve_viewer
+from widefield.gui.svd_viewer import svd_viewer
 
 __all__ = [
     "pixel_correlation_viewer",
     "pixel_tuning_curve_viewer",
     "movie_with_traces",
+    "svd_viewer",
     "Trace",
     "AuxVideo",
 ]
@@ -41,4 +43,8 @@ def __getattr__(name):
         from widefield.gui import movie_with_traces as mwt
 
         return mwt.MovieWithTracesViewer
+    if name == "SVDViewer":
+        from widefield.gui import svd_viewer as sv
+
+        return sv.SVDViewer
     raise AttributeError(name)

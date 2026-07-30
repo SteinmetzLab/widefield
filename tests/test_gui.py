@@ -25,7 +25,6 @@ from widefield.gui.pixel_correlation import _get_class as _corr_class  # noqa: E
 from widefield.gui.pixel_tuning_curve import _get_class as _tuning_class  # noqa: E402
 from widefield.svd import pixel_timecourse, svd_frame_reconstruct  # noqa: E402
 
-
 # --------------------------------------------------------------------------- fixtures
 
 

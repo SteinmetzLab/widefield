@@ -14,7 +14,6 @@ from widefield.events import (
 )
 from widefield.svd import pixel_timecourse, svd_frame_reconstruct
 
-
 # --------------------------------------------------------------------- MATLAB's colon
 
 

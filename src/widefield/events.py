@@ -111,8 +111,9 @@ def event_locked_avg_svd(
     flat_times = peri_times.ravel()
     peri_v = np.empty((n_sv, n_ev, n_win), dtype=float)
     for s in range(n_sv):
-        peri_v[s] = np.interp(flat_times, t, np.asarray(v[s], dtype=float), left=np.nan, right=np.nan
-                              ).reshape(n_ev, n_win)
+        peri_v[s] = np.interp(
+            flat_times, t, np.asarray(v[s], dtype=float), left=np.nan, right=np.nan
+        ).reshape(n_ev, n_win)
 
     conditions = np.unique(sorted_labels)
     avg_v = np.empty((conditions.size, n_sv, n_win), dtype=float)

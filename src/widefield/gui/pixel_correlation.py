@@ -27,7 +27,9 @@ from widefield.correlation import SeedCorrelation
 from widefield.gui._common import Orientation, ensure_app, require_qt, run_app
 from widefield.svd import pixel_timecourse
 
-__all__ = ["PixelCorrelationViewer", "pixel_correlation_viewer"]
+# PixelCorrelationViewer is served by the module __getattr__ below (it cannot be defined at
+# module level without importing Qt), which static analysis cannot see.
+__all__ = ["PixelCorrelationViewer", "pixel_correlation_viewer"]  # noqa: F822
 
 _STEP = 5  # arrow-key step in pixels; Ctrl gives single pixels (as in the MATLAB)
 
@@ -231,7 +233,9 @@ def _build():
             if self._hover:
                 bits.append("HOVER ON")
             if self._orient.rot or self._orient.flip:
-                bits.append(f"rot {self._orient.rot * 90}deg{' flipped' if self._orient.flip else ''}")
+                bits.append(
+                    f"rot {self._orient.rot * 90}deg{' flipped' if self._orient.flip else ''}"
+                )
             bits.append(f"{self._corr.n_components} components")
             self._status.setText("  |  ".join(bits))
 

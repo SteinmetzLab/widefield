@@ -44,7 +44,7 @@ def polygon_mask(vertices: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     inside = np.zeros((ypix, xpix), dtype=bool)
     x0, y0 = vertices[:, 0], vertices[:, 1]
     x1, y1 = np.roll(x0, -1), np.roll(y0, -1)
-    for ax, ay, bx, by in zip(x0, y0, x1, y1):
+    for ax, ay, bx, by in zip(x0, y0, x1, y1, strict=True):
         if ay == by:  # horizontal edges never count as crossings under the even-odd rule
             continue
         straddles = (py >= min(ay, by)) & (py < max(ay, by))
