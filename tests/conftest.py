@@ -8,10 +8,15 @@ MATLAB behaviour on any machine, with no MATLAB installed.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+# Must be set before Qt is imported anywhere: the GUI tests run without a display (and this
+# keeps them from stealing focus on a developer's desktop).
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 DATA_DIR = Path(__file__).parent / "data"
 REFERENCE_MAT = DATA_DIR / "matlab_reference.mat"

@@ -116,9 +116,10 @@ def _read_component_prefix(
 
     if not hdr.fortran_order:
         # C-ordered files interleave components across the whole file; fall back to a full
-        # read + slice rather than reading the wrong bytes.
+        # read + slice rather than reading the wrong bytes. Returned in the same F-style
+        # layout the fast path produces, so callers need not care which route was taken.
         arr = np.load(path, mmap_mode="r")
-        return np.ascontiguousarray(arr[..., :nsv].reshape(-1, order="F")), tuple(leading)
+        return np.asarray(arr[..., :nsv]).reshape(-1, order="F"), tuple(leading)
 
     per_component = int(np.prod(leading))
     count = per_component * nsv
@@ -159,8 +160,15 @@ def read_u_from_npy(
         raise ValueError(f"{path.name}: expected U shape (Ypix, Xpix, nSV), got {leading + (-1,)}")
     ypix, xpix = leading
     n = flat.size // (ypix * xpix)
-    # Fortran order within each component block: (y, x) with y fastest.
-    return np.asfortranarray(flat.reshape(ypix, xpix, n, order="F"))
+
+    # The file is component-major with (y, x) Fortran-ordered inside each component, i.e. the
+    # buffer is a C-ordered (nSV, Xpix, Ypix). Transpose it to a C-contiguous (Ypix, Xpix, nSV)
+    # here, once, so that `flatten_u` downstream is a free reshape.
+    #
+    # This costs one pass over the array on load (a few hundred ms for 210 MB) and removes the
+    # same copy from every reconstruction path. MATLAB gets its equivalent reshape for free
+    # because it is column-major throughout; paying it once at the boundary is how we match.
+    return np.ascontiguousarray(flat.reshape(n, xpix, ypix).transpose(2, 1, 0))
 
 
 def read_v_from_npy(
@@ -283,11 +291,16 @@ def cache_dir() -> Path:
     return root
 
 
+# Bump when the *layout or content* of a cached array changes, so existing caches miss instead
+# of being served in a format the current code no longer expects. v2: U became C-contiguous.
+_CACHE_FORMAT = 2
+
+
 def _cache_path(src: Path, tag: str) -> Path:
     """Cache filename keyed on the source's identity *and* size+mtime, so stale data misses."""
     st = src.stat()
-    key = f"{src.resolve()}|{st.st_size}|{int(st.st_mtime)}|{tag}"
-    return cache_dir() / f"{src.stem}.{tag}.{hashlib.sha1(key.encode()).hexdigest()[:16]}.npy"
+    key = f"{src.resolve()}|{st.st_size}|{int(st.st_mtime)}|{tag}|v{_CACHE_FORMAT}"
+    return cache_dir() / f"{src.stem}.{tag}.v{_CACHE_FORMAT}.{hashlib.sha1(key.encode()).hexdigest()[:16]}.npy"
 
 
 def _cached(src: Path, tag: str, build: Callable[[], np.ndarray], use_cache: bool) -> np.ndarray:

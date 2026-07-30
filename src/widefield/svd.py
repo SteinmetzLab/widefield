@@ -39,15 +39,19 @@ __all__ = [
 def flatten_u(u: np.ndarray) -> np.ndarray:
     """``U`` ``(Ypix, Xpix, nSV)`` → ``(nPix, nSV)``, C-contiguous.
 
-    Contiguity matters: every reconstruction is a GEMM/GEMV against this array, and a
-    strided view (e.g. from spatial binning) silently costs a copy inside BLAS on every
-    call instead of once here.
+    Contiguity matters: every reconstruction is a GEMM/GEMV against this array, and a strided
+    or Fortran-ordered view silently costs a full copy inside BLAS on every call instead of
+    once here.
+
+    For a C-contiguous ``u`` (what :func:`widefield.io.read_u_from_npy` returns) this is a free
+    reshape — no copy — which is what makes it safe to call per frame.
     """
     u = np.asarray(u)
     if u.ndim != 3:
         raise ValueError(f"U must be (Ypix, Xpix, nSV); got shape {u.shape}")
     ypix, xpix, nsv = u.shape
-    return np.ascontiguousarray(u.reshape(ypix * xpix, nsv))
+    flat = u.reshape(ypix * xpix, nsv)
+    return flat if flat.flags["C_CONTIGUOUS"] else np.ascontiguousarray(flat)
 
 
 def _aligned_nsv(u: np.ndarray, v: np.ndarray) -> int:
