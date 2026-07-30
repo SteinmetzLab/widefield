@@ -19,8 +19,8 @@ from PySide6 import QtCore, QtGui  # noqa: E402
 from widefield.correlation import SeedCorrelation  # noqa: E402
 from widefield.events import event_locked_avg_svd  # noqa: E402
 from widefield.gui._common import polygon_mask  # noqa: E402
-from widefield.gui.movie_with_traces import Trace  # noqa: E402
-from widefield.gui.movie_with_traces import _get_class as _movie_class  # noqa: E402
+from widefield.gui.movie import Trace  # noqa: E402
+from widefield.gui.movie import _get_class as _movie_class  # noqa: E402
 from widefield.gui.pixel_correlation import _get_class as _corr_class  # noqa: E402
 from widefield.gui.pixel_tuning_curve import _get_class as _tuning_class  # noqa: E402
 from widefield.svd import pixel_timecourse, svd_frame_reconstruct  # noqa: E402
@@ -440,35 +440,106 @@ def test_movie_play_toggle(movie_viewer):
     assert not movie_viewer._playing
 
 
-def test_movie_rate_doubles_and_halves(movie_viewer):
+def test_movie_speed_doubles_and_halves(movie_viewer):
+    assert movie_viewer.speed == 1.0
     press(movie_viewer, QtCore.Qt.Key_Up)
-    assert movie_viewer.rate == 2
+    assert movie_viewer.speed == 2.0
     press(movie_viewer, QtCore.Qt.Key_Up)
-    assert movie_viewer.rate == 4
+    assert movie_viewer.speed == 4.0
     press(movie_viewer, QtCore.Qt.Key_Down)
-    assert movie_viewer.rate == 2
-    for _ in range(5):
+    assert movie_viewer.speed == 2.0
+
+
+def test_movie_speed_allows_slow_motion(movie_viewer):
+    """Unlike the MATLAB's integer frame-step, speed can go below 1 for slow motion."""
+    for _ in range(3):
         press(movie_viewer, QtCore.Qt.Key_Down)
-    assert movie_viewer.rate == 1
+    assert movie_viewer.speed == pytest.approx(0.125)
 
 
-def test_movie_tick_advances_by_rate_and_wraps(movie_viewer):
-    press(movie_viewer, QtCore.Qt.Key_Up)  # rate 2
-    movie_viewer.set_frame(0)
+def test_movie_speed_is_clamped(movie_viewer):
+    for _ in range(20):
+        press(movie_viewer, QtCore.Qt.Key_Up)
+    assert movie_viewer.speed <= 64
+    for _ in range(40):
+        press(movie_viewer, QtCore.Qt.Key_Down)
+    assert movie_viewer.speed >= 1 / 32
+
+
+def test_movie_playback_follows_the_wall_clock(movie_viewer, monkeypatch):
+    """Frames come from elapsed time, not one-per-tick, so playback holds its speed.
+
+    This is the fix for the reported "plays at ~2 fps": rendering a big window is slower than the
+    frame rate, and advancing one frame per tick made the recording crawl instead of dropping
+    frames.
+    """
+    import widefield.gui.movie as mwt
+
+    clock = [1000.0]
+    monkeypatch.setattr(mwt.time, "perf_counter", lambda: clock[0])
+
+    movie_viewer._playing = True
+    movie_viewer.set_frame(0)  # anchors the clock at t=1000
+    fs = movie_viewer._fs
+
+    clock[0] += 1.0  # one second of wall time
     movie_viewer._on_tick()
-    assert movie_viewer.frame == 2
-    movie_viewer.set_frame(movie_viewer._n_frames - 1)
+    assert movie_viewer.frame == pytest.approx(int(fs), abs=1)  # ~fs frames later
+
+    clock[0] += 2.0
+    movie_viewer._on_tick()
+    assert movie_viewer.frame == pytest.approx(int(3 * fs), abs=1)
+
+
+def test_movie_playback_drops_frames_rather_than_slowing(movie_viewer, monkeypatch):
+    """A single slow tick must jump, not fall behind."""
+    import widefield.gui.movie as mwt
+
+    clock = [500.0]
+    monkeypatch.setattr(mwt.time, "perf_counter", lambda: clock[0])
+    movie_viewer._playing = True
+    movie_viewer.set_frame(0)
+
+    clock[0] += 0.5  # a single 500 ms stall
+    movie_viewer._on_tick()
+    assert movie_viewer.frame > 10  # jumped ahead, not one frame
+
+
+def test_movie_speed_scales_the_advance(movie_viewer, monkeypatch):
+    import widefield.gui.movie as mwt
+
+    clock = [0.0]
+    monkeypatch.setattr(mwt.time, "perf_counter", lambda: clock[0])
+    movie_viewer._playing = True
+    movie_viewer.set_speed(4.0)
+    movie_viewer.set_frame(0)
+    clock[0] += 1.0
+    movie_viewer._on_tick()
+    assert movie_viewer.frame == pytest.approx(int(4 * movie_viewer._fs), abs=2)
+
+
+def test_movie_playback_restarts_at_the_end(movie_viewer, monkeypatch):
+    """MATLAB restarts at frame 1 rather than wrapping modulo; keep that."""
+    import widefield.gui.movie as mwt
+
+    clock = [0.0]
+    monkeypatch.setattr(mwt.time, "perf_counter", lambda: clock[0])
+    movie_viewer._playing = True
+    movie_viewer.set_frame(movie_viewer._n_frames - 2)
+    clock[0] += 10.0
     movie_viewer._on_tick()
     assert movie_viewer.frame == 0
 
 
-def test_movie_b_jumps_back_by_twenty_times_rate(movie_viewer):
+def test_movie_b_jumps_back_half_a_second(movie_viewer):
+    fs = movie_viewer._fs
     movie_viewer.set_frame(500)
     press(movie_viewer, QtCore.Qt.Key_B)
-    assert movie_viewer.frame == 480
-    press(movie_viewer, QtCore.Qt.Key_Up)  # rate 2
+    assert movie_viewer.frame == 500 - int(round(0.5 * fs))
+    movie_viewer.set_frame(500)
+    press(movie_viewer, QtCore.Qt.Key_Up)  # speed 2
     press(movie_viewer, QtCore.Qt.Key_B)
-    assert movie_viewer.frame == 440
+    assert movie_viewer.frame == 500 - int(round(0.5 * fs * 2))
 
 
 def test_movie_b_clamps_at_zero(movie_viewer):
@@ -521,7 +592,7 @@ def test_movie_each_pixel_gets_a_curve(movie_viewer):
 
 def test_movie_pixel_colors_cycle_after_five(movie_viewer):
     """MATLAB cycles through 5 colors even though 7 are defined."""
-    from widefield.gui.movie_with_traces import _N_CYCLE, _PIXEL_COLORS
+    from widefield.gui.movie import _N_CYCLE, _PIXEL_COLORS
 
     assert _N_CYCLE == 5
     np.testing.assert_allclose(_PIXEL_COLORS[_N_CYCLE % _N_CYCLE], _PIXEL_COLORS[0])
@@ -607,7 +678,7 @@ def test_movie_nsv_display_caps_components(qtbot, movie_data):
 
 
 def test_movie_aux_video_renderer_is_called(qtbot, movie_data):
-    from widefield.gui.movie_with_traces import AuxVideo
+    from widefield.gui.movie import AuxVideo
 
     u, v, t = movie_data
     calls = []
@@ -624,7 +695,7 @@ def test_movie_aux_video_renderer_is_called(qtbot, movie_data):
 
 
 def test_movie_broken_aux_video_does_not_crash_playback(qtbot, movie_data):
-    from widefield.gui.movie_with_traces import AuxVideo
+    from widefield.gui.movie import AuxVideo
 
     u, v, t = movie_data
 

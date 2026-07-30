@@ -20,8 +20,8 @@ import numpy as np
 
 import widefield as wf
 from widefield.gui._common import ensure_app
-from widefield.gui.movie_with_traces import Trace
-from widefield.gui.movie_with_traces import _get_class as movie_class
+from widefield.gui.movie import Trace
+from widefield.gui.movie import _get_class as movie_class
 from widefield.gui.pixel_correlation import _get_class as corr_class
 from widefield.gui.pixel_tuning_curve import _get_class as tuning_class
 from widefield.gui.svd_viewer import _get_class as svd_class
@@ -210,6 +210,12 @@ def main() -> int:
     ap.add_argument("--nsv", type=int, default=200, help="components to load (default 200)")
     ap.add_argument("--calc-win", type=float, nargs=2, default=(-0.3, 0.8), metavar=("T0", "T1"))
     ap.add_argument(
+        "--no-opengl",
+        action="store_true",
+        help="disable OpenGL rendering in the movie viewer (it is on by default, and is worth "
+        "about a third of the frame rate on a large window)",
+    )
+    ap.add_argument(
         "--only",
         nargs="+",
         choices=["svd", "corr", "tuning", "movie"],
@@ -317,6 +323,7 @@ def main() -> int:
             dff_v,
             t=t_disp,
             traces=traces,
+            use_opengl=not args.no_opengl,
         )
         w_movie.setWindowTitle("4. Movie with traces  —  movieWithTracesSVD")
         windows.append(w_movie)

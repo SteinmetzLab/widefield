@@ -14,7 +14,7 @@ Needs the GUI extra: ``pip install 'widefield[gui]'``.
 
 from __future__ import annotations
 
-from widefield.gui.movie_with_traces import AuxVideo, Trace, movie_with_traces
+from widefield.gui.movie import AuxVideo, Trace, movie_with_traces
 from widefield.gui.pixel_correlation import pixel_correlation_viewer
 from widefield.gui.pixel_tuning_curve import pixel_tuning_curve_viewer
 from widefield.gui.svd_viewer import svd_viewer
@@ -40,7 +40,7 @@ def __getattr__(name):
 
         return pixel_tuning_curve.PixelTuningCurveViewer
     if name == "MovieWithTracesViewer":
-        from widefield.gui import movie_with_traces as mwt
+        from widefield.gui import movie as mwt
 
         return mwt.MovieWithTracesViewer
     if name == "SVDViewer":

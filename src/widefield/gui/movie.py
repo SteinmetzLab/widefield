@@ -10,8 +10,8 @@ MATLAB parity
 ==========================  ============================================================
 ``p``                        play / pause
 ``r``                        start / stop recording (needs ``movie_save_path``)
-up / down                    double / halve playback rate
-``b``                        jump back 20 frames x rate
+up / down                    double / halve playback **speed** (see below)
+``b``                        jump back half a second (x speed)
 click                        move the selected pixel
 **ctrl+click**               add another pixel (each gets its own color)
 ``c``                        clear all but the last pixel
@@ -23,6 +23,18 @@ alt + up/down                flip vertically
 Adding a pixel is ctrl+click rather than the MATLAB's right-click: in pyqtgraph right-click
 opens the view's own context menu, so the two actions fought each other.
 
+Playback is driven by the **wall clock**, not one frame per timer tick. The MATLAB advanced a
+fixed number of frames per 100 ms tick, which caps playback at 10 fps and means a big window or a
+slow machine silently plays the recording in slow motion. Here the frame is computed from elapsed
+time, so frames are *dropped* when rendering cannot keep up and the movie always runs at the
+requested speed. ``speed`` is a float multiplier (1.0 = real time), so slow motion works too --
+the MATLAB's integer frame-step could only ever skip.
+
+The readout shows the frames actually drawn per second, so a slow render is visible rather than
+mysterious. Rendering cost is dominated by blitting the upscaled image: on a 2540x1360 window a
+560x560 movie draws at ~8 fps, a half-size window at ~22 fps, and ``use_opengl=True`` buys about
+a third on top.
+
 Additions over the MATLAB: a scrub slider and frame/time readout, ``home`` to jump to the start,
 a **temporal band-pass** (type cutoffs in Hz; filtering ``V`` filters every pixel, so it is cheap
 to re-apply), a **Follow** toggle so a manual zoom on the trace plots survives playback instead
@@ -32,6 +44,8 @@ full-rank playback can't keep up.
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -48,11 +62,16 @@ from widefield.gui._common import (
 )
 from widefield.svd import flatten_u
 
+log = logging.getLogger(__name__)
+
 __all__ = ["Trace", "AuxVideo", "movie_with_traces"]
 
 _WINDOW_SECONDS = 10.0  # trace window width; MATLAB's windowSize
-_TIMER_MS = 100  # MATLAB timer Period 0.1 s
-_JUMP_BACK_FRAMES = 20  # MATLAB's 'b'
+# Poll rate, not frame rate. The MATLAB used a 100 ms timer and advanced one frame per tick,
+# which caps playback at 10 fps however fast the machine is. We poll often and let the wall
+# clock decide which frame to show, so 60 Hz is just 'check frequently enough'.
+_TIMER_MS = 16
+_JUMP_BACK_SECONDS = 0.5  # MATLAB's 'b' jumped 20 frames; express it as time instead
 # Frames reconstructed per batch during playback. At 512x512x2000 a block costs
 # nPix * block * 4 bytes (~33 MB at 32 frames) and turns a GEMV into a GEMM.
 _PREFETCH_BLOCK = 32
@@ -147,6 +166,7 @@ def _build():
             aux_videos=None,
             nsv_display=None,
             cax=(-0.4, 0.4),
+            use_opengl=False,
             parent=None,
         ):
             super().__init__(parent)
@@ -187,8 +207,12 @@ def _build():
             self._aux = list(aux_videos or [])
             self._orient = Orientation()
             self._frame = 0
-            self._rate = 1
+            self._speed = 1.0  # playback speed multiplier; 1.0 is real time
             self._playing = False
+            self._play_t0 = 0.0
+            self._play_frame0 = 0
+            self._fps_t0 = 0.0
+            self._fps_count = 0
             self._cax = [float(cax[0]), float(cax[1])]
             self._pixels: list[tuple[int, int]] = [(self.shape[0] // 2, self.shape[1] // 2)]
             self._pixel_traces: list[np.ndarray] = []
@@ -196,6 +220,7 @@ def _build():
             self._writer = None
             self._movie_save_path = movie_save_path
             self._recording = False
+            self._use_opengl = bool(use_opengl)
 
             self.setWindowTitle("Movie with traces (SVD)")
             self._build_ui(pg, QtWidgets)
@@ -251,6 +276,14 @@ def _build():
             root.addWidget(self.bandpass)
 
             self._glw = pg.GraphicsLayoutWidget()
+            if self._use_opengl:
+                # Measured ~33% faster on a 2540x1360 window (82 -> 61 ms/frame): the cost is
+                # blitting the upscaled image, which the GPU does better. Optional because it
+                # needs working OpenGL drivers, and pyqtgraph's path for it is less exercised.
+                try:
+                    self._glw.useOpenGL(True)
+                except Exception:  # pragma: no cover - depends on the machine
+                    log.debug("OpenGL unavailable; using the raster path", exc_info=True)
             root.addWidget(self._glw, stretch=1)
 
             # Column 0: the movie. Columns 1..: stacked traces, then any aux videos.
@@ -408,13 +441,12 @@ def _build():
             if key == QtCore.Qt.Key_P:
                 self._play_btn.setChecked(not self._play_btn.isChecked())
             elif key == QtCore.Qt.Key_Up:
-                self._rate *= 2
-                self._refresh()
+                self.set_speed(self._speed * 2)
             elif key == QtCore.Qt.Key_Down:
-                self._rate = max(1, self._rate // 2)
-                self._refresh()
+                self.set_speed(self._speed / 2)
             elif key == QtCore.Qt.Key_B:
-                self.set_frame(self._frame - _JUMP_BACK_FRAMES * self._rate)
+                back = max(1, int(round(_JUMP_BACK_SECONDS * self._fs * self._speed)))
+                self.set_frame(self._frame - back)
             elif key == QtCore.Qt.Key_Home:
                 self.set_frame(0)
             elif key == QtCore.Qt.Key_C:
@@ -466,6 +498,7 @@ def _build():
             self._playing = on
             self._play_btn.setText("pause" if on else "play")
             if on:
+                self._anchor_playback()
                 self._timer.start()
             else:
                 self._timer.stop()
@@ -475,18 +508,65 @@ def _build():
             if value != self._frame:
                 self.set_frame(value)
 
+        def _anchor_playback(self) -> None:
+            """Peg wall-clock time to the current frame; playback is measured from here."""
+            self._play_t0 = time.perf_counter()
+            self._play_frame0 = self._frame
+            self._fps_t0 = self._play_t0
+            self._fps_count = 0
+
         def _on_tick(self) -> None:
-            # MATLAB restarts from the first frame when it runs past the end
-            # (``if currentFrame > size(V,2); currentFrame = 1;``) rather than wrapping modulo,
-            # so at rate > 1 the remainder is discarded. Note this differs from the tuning
-            # viewer, which really is modulo — the two MATLAB files disagree, and so do we.
-            nxt = self._frame + self._rate
-            self.set_frame(0 if nxt >= self._n_frames else nxt)
+            """Advance to whichever frame the wall clock says we should be showing.
+
+            Deliberately *not* "advance N frames per tick", which is what the MATLAB does. That
+            couples playback speed to how fast frames can be drawn, so a big window or a slow
+            machine plays the recording in slow motion — on a 2540x1360 window a 560x560 movie
+            renders at ~12 fps, which for a 35 Hz recording is 0.35x real time and reads as
+            "broken" rather than "slow".
+
+            Computing the target frame from elapsed time instead means frames are *dropped* when
+            rendering cannot keep up, and the movie always plays at the requested speed. This is
+            what every video player does.
+            """
+            elapsed = time.perf_counter() - self._play_t0
+            target = self._play_frame0 + elapsed * self._fs * self._speed
+            if target >= self._n_frames:
+                # MATLAB restarts at the first frame rather than wrapping modulo; keep that, and
+                # re-peg the clock so the next lap is timed from the restart.
+                self._frame = 0
+                self._anchor_playback()
+            else:
+                self._frame = int(target)
+            self._refresh()
+
+            self._fps_count += 1
             if self._recording:
                 self._grab_frame()
 
+        def _achieved_fps(self) -> float | None:
+            """Frames actually drawn per second, over the last stretch of playback."""
+            if not self._playing or self._fps_count < 3:
+                return None
+            dt = time.perf_counter() - self._fps_t0
+            if dt < 0.4:  # too short a sample to be meaningful
+                return None
+            fps = self._fps_count / dt
+            if dt > 2.0:  # restart the window so the number tracks rather than averaging forever
+                self._fps_t0 = time.perf_counter()
+                self._fps_count = 0
+            return fps
+
         def set_frame(self, frame: int) -> None:
             self._frame = int(np.clip(frame, 0, self._n_frames - 1))
+            if self._playing:
+                self._anchor_playback()  # a manual jump re-pegs the clock
+            self._refresh()
+
+        def set_speed(self, speed: float) -> None:
+            """Playback speed multiplier. 1.0 is real time; clamped to a sane range."""
+            self._speed = float(np.clip(speed, 1 / 32, 64))
+            if self._playing:
+                self._anchor_playback()
             self._refresh()
 
         # ---------------------------------------------------------------- recording
@@ -596,10 +676,15 @@ def _build():
             bits = [
                 f"frame {self._frame + 1}/{self._n_frames}",
                 f"t = {now:.3f} s",
-                f"rate x{self._rate}",
+                f"speed {self._speed:g}x",
                 f"scale +/-{self._cax[1]:.3g}",
                 f"{len(self._pixels)} px",
             ]
+            achieved = self._achieved_fps()
+            if achieved is not None:
+                # Surfaced so slow rendering is visible rather than mysterious: if this sits
+                # well below fs * speed, frames are being dropped to hold the speed.
+                bits.append(f"{achieved:.0f} fps drawn")
             if self._recording:
                 bits.append("RECORDING")
             # Aux failures go last so the status line does not silently clobber them — a broken
@@ -635,8 +720,9 @@ def _build():
             return self._frame
 
         @property
-        def rate(self):
-            return self._rate
+        def speed(self) -> float:
+            """Playback speed multiplier (1.0 = real time)."""
+            return self._speed
 
         @property
         def frame_image(self) -> np.ndarray:
@@ -670,6 +756,7 @@ def movie_with_traces(
     aux_videos=None,
     nsv_display: int | None = None,
     cax: tuple[float, float] = (-0.4, 0.4),
+    use_opengl: bool = False,
     block: bool = True,
 ):
     """Open the movie viewer. Equivalent to ``movieWithTracesSVD(U, V, t, traces, path[, auxVid])``.
@@ -684,6 +771,8 @@ def movie_with_traces(
         stutters; the image gets smoother, not wrong.
     cax : initial color limits. The default assumes dF/F — run :func:`widefield.dff_from_svd`
         first, or widen this, for raw components.
+    use_opengl : render through OpenGL. Roughly 33% faster on a large window, at the cost of
+        needing working drivers; falls back to the raster path if unavailable.
     """
     app = ensure_app()
     viewer = _get_class()(
@@ -695,6 +784,7 @@ def movie_with_traces(
         aux_videos=aux_videos,
         nsv_display=nsv_display,
         cax=cax,
+        use_opengl=use_opengl,
     )
     viewer.resize(1400, 780)
     viewer.show()

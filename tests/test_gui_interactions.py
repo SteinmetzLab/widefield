@@ -14,8 +14,8 @@ pytest.importorskip("PySide6")
 
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
-from widefield.gui.movie_with_traces import Trace  # noqa: E402
-from widefield.gui.movie_with_traces import _get_class as _movie_class  # noqa: E402
+from widefield.gui.movie import Trace  # noqa: E402
+from widefield.gui.movie import _get_class as _movie_class  # noqa: E402
 from widefield.gui.pixel_correlation import _get_class as _corr_class  # noqa: E402
 from widefield.svd import bandpass_filt  # noqa: E402
 
