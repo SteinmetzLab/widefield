@@ -41,11 +41,12 @@ from widefield.gui._common import (
     Orientation,
     ensure_app,
     install_hotkeys,
+    make_bandpass_control,
     require_qt,
     run_app,
     text_entry_focused,
 )
-from widefield.svd import bandpass_filt, flatten_u
+from widefield.svd import flatten_u
 
 __all__ = ["Trace", "AuxVideo", "movie_with_traces"]
 
@@ -243,37 +244,8 @@ def _build():
                 controls.addWidget(self._rec_btn)
             root.addLayout(controls)
 
-            # Temporal band-pass. Filtering V filters every pixel, so this is cheap enough to
-            # re-apply interactively.
-            filt_row = QtWidgets.QHBoxLayout()
-            filt_row.addWidget(QtWidgets.QLabel("Band-pass — high-pass (Hz):"))
-            self._hp_edit = QtWidgets.QLineEdit("0")
-            self._hp_edit.setFixedWidth(70)
-            self._hp_edit.setToolTip("Lower cutoff in Hz. 0 means no high-pass.")
-            filt_row.addWidget(self._hp_edit)
-            filt_row.addWidget(QtWidgets.QLabel("low-pass (Hz):"))
-            self._lp_edit = QtWidgets.QLineEdit("inf")
-            self._lp_edit.setFixedWidth(70)
-            self._lp_edit.setToolTip(
-                f"Upper cutoff in Hz. inf means no low-pass (Nyquist is " f"{self._fs / 2:.2f} Hz)."
-            )
-            filt_row.addWidget(self._lp_edit)
-            apply_btn = QtWidgets.QPushButton("Apply")
-            apply_btn.setFixedWidth(70)
-            apply_btn.clicked.connect(self._apply_filter)
-            filt_row.addWidget(apply_btn)
-            reset_btn = QtWidgets.QPushButton("Reset")
-            reset_btn.setFixedWidth(70)
-            reset_btn.clicked.connect(self._reset_filter)
-            filt_row.addWidget(reset_btn)
-            self._filt_label = QtWidgets.QLabel("unfiltered")
-            self._filt_label.setStyleSheet("color: gray;")
-            filt_row.addWidget(self._filt_label)
-            filt_row.addStretch(1)
-            # Enter in either box applies, which is what you expect after typing a number.
-            self._hp_edit.returnPressed.connect(self._apply_filter)
-            self._lp_edit.returnPressed.connect(self._apply_filter)
-            root.addLayout(filt_row)
+            self.bandpass = make_bandpass_control(self._v_raw, self._fs, self._on_filtered)
+            root.addWidget(self.bandpass)
 
             self._glw = pg.GraphicsLayoutWidget()
             root.addWidget(self._glw, stretch=1)
@@ -459,49 +431,12 @@ def _build():
 
         # ---------------------------------------------------------------- band-pass filter
 
-        @staticmethod
-        def _parse_cutoff(text: str, default: float) -> float:
-            text = text.strip().lower()
-            if text in ("", "none"):
-                return default
-            if text in ("inf", "+inf", "infinity"):
-                return np.inf
-            return float(text)
-
-        def _apply_filter(self) -> None:
-            """Band-pass V and rebuild everything derived from it."""
-            try:
-                hp = self._parse_cutoff(self._hp_edit.text(), 0.0)
-                lp = self._parse_cutoff(self._lp_edit.text(), np.inf)
-                filtered = bandpass_filt(self._v_raw, self._fs, highpass=hp, lowpass=lp)
-            except ValueError as exc:
-                self._filt_label.setText(f"invalid: {exc}")
-                self._filt_label.setStyleSheet("color: #cc4444;")
-                return
-
-            self._v32 = np.asfortranarray(filtered, dtype=np.float32)
+        def _on_filtered(self, filtered_v, _description) -> None:
+            """Swap in band-passed components and rebuild everything derived from them."""
+            self._v32 = np.asfortranarray(filtered_v, dtype=np.float32)
             self._invalidate_frames()
             self._recompute_pixel_traces()
-
-            nyquist = self._fs / 2.0
-            active_hp = hp > 0
-            active_lp = np.isfinite(lp) and lp < nyquist
-            if active_hp and active_lp:
-                desc = f"band-pass {hp:g}–{lp:g} Hz"
-            elif active_hp:
-                desc = f"high-pass {hp:g} Hz"
-            elif active_lp:
-                desc = f"low-pass {lp:g} Hz"
-            else:
-                desc = "unfiltered"
-            self._filt_label.setText(f"{desc} (Butterworth order 3, zero-phase)")
-            self._filt_label.setStyleSheet("color: gray;")
             self._refresh()
-
-        def _reset_filter(self) -> None:
-            self._hp_edit.setText("0")
-            self._lp_edit.setText("inf")
-            self._apply_filter()
 
         def _invalidate_frames(self) -> None:
             """Drop the prefetched reconstruction block after V changes underneath it."""

@@ -106,10 +106,10 @@ def test_hotkeys_work_with_focus_on_the_slider(movie):
 
 def test_hotkeys_suppressed_while_typing_in_a_cutoff_box(movie):
     """Typing "-" into the high-pass box must not rescale the colour axis."""
-    movie._hp_edit.setFocus()
+    movie.bandpass.hp_edit.setFocus()
     before = list(movie._cax)
     QtWidgets.QApplication.sendEvent(
-        movie._hp_edit,
+        movie.bandpass.hp_edit,
         QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Minus, QtCore.Qt.NoModifier),
     )
     assert movie._cax == before
@@ -139,6 +139,131 @@ def test_correlation_viewer_hotkeys_also_route_from_children(qtbot, movie_data):
         w._glw, QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_V, QtCore.Qt.NoModifier)
     )
     assert w._normalize_by_max is True
+
+
+def test_correlation_hotkeys_suppressed_while_typing_a_cutoff(qtbot, movie_data):
+    u, v, t, _ = movie_data
+    w = _corr_class()(u, v, t=t)
+    qtbot.addWidget(w)
+    w.bandpass.hp_edit.setFocus()
+    before = w._normalize_by_max
+    QtWidgets.QApplication.sendEvent(
+        w.bandpass.hp_edit,
+        QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_V, QtCore.Qt.NoModifier),
+    )
+    assert w._normalize_by_max == before
+
+
+# ===================================================================== correlation band-pass
+
+
+@pytest.fixture
+def corr(qtbot, movie_data):
+    u, v, t, _ = movie_data
+    w = _corr_class()(u, v, t=t)
+    qtbot.addWidget(w)
+    return w
+
+
+def test_corr_bandpass_starts_unfiltered(corr):
+    assert corr.bandpass.description == "unfiltered"
+    assert corr.bandpass.hp_edit.text() == "0"
+    assert corr.bandpass.lp_edit.text() == "inf"
+
+
+def test_corr_bandpass_changes_the_map(corr):
+    """Removing the slow drift changes which pixels look correlated — the point of the feature."""
+    corr.set_pixel(8, 6)
+    before = corr.correlation_map.copy()
+    corr.bandpass.hp_edit.setText("1.0")
+    corr.bandpass.apply()
+    assert not np.allclose(before, corr.correlation_map)
+
+
+def test_corr_bandpass_rebuilds_the_precompute(corr):
+    """The covariance depends on V, so SeedCorrelation must be rebuilt, not reused."""
+    before = corr._corr
+    corr.bandpass.hp_edit.setText("1.0")
+    corr.bandpass.apply()
+    assert corr._corr is not before
+
+
+def test_corr_bandpass_map_matches_a_direct_computation(corr):
+    """Cross-check the filtered map against SeedCorrelation on independently filtered V.
+
+    The float32 cast mirrors what the viewer does: bandpass_filt works in float64, and keeping
+    that through the covariance shifts values by ~1e-5 — invisible on a [-1, 1] map, but enough
+    to matter if this comparison did not apply the same rounding.
+    """
+    from widefield.correlation import SeedCorrelation
+    from widefield.svd import bandpass_filt
+
+    corr.bandpass.hp_edit.setText("1.0")
+    corr.bandpass.apply()
+    corr.set_pixel(7, 5)
+
+    filtered = np.asarray(bandpass_filt(corr._v_raw, corr._fs, highpass=1.0), dtype=np.float32)
+    expected = SeedCorrelation(corr._u, filtered).map((7, 5))
+    np.testing.assert_allclose(corr.correlation_map, expected, atol=1e-6)
+
+
+def test_corr_bandpass_self_correlation_stays_unity(corr):
+    corr.bandpass.hp_edit.setText("1.0")
+    corr.bandpass.apply()
+    corr.set_pixel(9, 4)
+    assert corr.correlation_map[9, 4] == pytest.approx(1.0, abs=1e-5)
+
+
+def test_corr_bandpass_reset_restores_the_original_map(corr):
+    corr.set_pixel(8, 6)
+    original = corr.correlation_map.copy()
+    corr.bandpass.hp_edit.setText("1.0")
+    corr.bandpass.apply()
+    corr.bandpass.reset()
+    corr.set_pixel(8, 6)
+    np.testing.assert_allclose(corr.correlation_map, original, atol=1e-6)
+
+
+def test_corr_bandpass_reapply_does_not_compound(corr):
+    corr.bandpass.hp_edit.setText("1.0")
+    corr.bandpass.apply()
+    corr.set_pixel(6, 6)
+    once = corr.correlation_map.copy()
+    corr.bandpass.apply()
+    corr.set_pixel(6, 6)
+    np.testing.assert_allclose(corr.correlation_map, once, atol=1e-6)
+
+
+def test_corr_bandpass_invalid_input_leaves_the_map_alone(corr):
+    corr.set_pixel(8, 6)
+    before = corr.correlation_map.copy()
+    corr.bandpass.hp_edit.setText("banana")
+    corr.bandpass.apply()
+    assert "invalid" in corr.bandpass.label.text()
+    np.testing.assert_allclose(corr.correlation_map, before, atol=1e-9)
+
+
+def test_corr_bandpass_shown_in_the_status(corr):
+    corr.bandpass.hp_edit.setText("0.5")
+    corr.bandpass.lp_edit.setText("5")
+    corr.bandpass.apply()
+    assert "band-pass 0.5" in corr._status.text()
+
+
+def test_corr_bandpass_hidden_without_timestamps(qtbot, movie_data):
+    """Cutoffs in Hz are meaningless with no sampling rate, so the control is hidden."""
+    u, v, _, _ = movie_data
+    w = _corr_class()(u, v, t=None)
+    qtbot.addWidget(w)
+    assert not w.bandpass.isVisible()
+
+
+def test_corr_hover_can_be_disabled_at_construction(qtbot, movie_data):
+    u, v, t, _ = movie_data
+    w = _corr_class()(u, v, t=t, hover=False)
+    qtbot.addWidget(w)
+    assert w._hover is False
+    assert "hover off" in w._status.text()
 
 
 # ===================================================================== ctrl+click
@@ -193,16 +318,16 @@ def test_ctrl_click_respects_orientation(movie):
 
 def test_filter_defaults_to_unfiltered(movie, movie_data):
     _, v, _, _ = movie_data
-    assert movie._hp_edit.text() == "0"
-    assert movie._lp_edit.text() == "inf"
-    assert "unfiltered" in movie._filt_label.text()
+    assert movie.bandpass.hp_edit.text() == "0"
+    assert movie.bandpass.lp_edit.text() == "inf"
+    assert "unfiltered" in movie.bandpass.label.text()
     np.testing.assert_allclose(np.asarray(movie._v32), v, atol=1e-5)
 
 
 def test_highpass_removes_the_slow_component(movie):
     """The fixture V has 0.02 Hz and 12 Hz content; a 1 Hz high-pass should kill the slow one."""
-    movie._hp_edit.setText("1.0")
-    movie._apply_filter()
+    movie.bandpass.hp_edit.setText("1.0")
+    movie.bandpass.apply()
     filtered = np.asarray(movie._v32)
 
     # Compare power below 0.1 Hz before and after.
@@ -212,12 +337,12 @@ def test_highpass_removes_the_slow_component(movie):
         return spec[:, freq < 0.1].sum()
 
     assert slow_power(filtered) < 0.01 * slow_power(movie._v_raw)
-    assert "high-pass 1 Hz" in movie._filt_label.text()
+    assert "high-pass 1 Hz" in movie.bandpass.label.text()
 
 
 def test_lowpass_removes_the_fast_component(movie):
-    movie._lp_edit.setText("2.0")
-    movie._apply_filter()
+    movie.bandpass.lp_edit.setText("2.0")
+    movie.bandpass.apply()
     filtered = np.asarray(movie._v32)
 
     def fast_power(x):
@@ -226,21 +351,21 @@ def test_lowpass_removes_the_fast_component(movie):
         return spec[:, freq > 5].sum()
 
     assert fast_power(filtered) < 0.01 * fast_power(movie._v_raw)
-    assert "low-pass 2 Hz" in movie._filt_label.text()
+    assert "low-pass 2 Hz" in movie.bandpass.label.text()
 
 
 def test_bandpass_reports_both_cutoffs(movie):
-    movie._hp_edit.setText("0.5")
-    movie._lp_edit.setText("5")
-    movie._apply_filter()
-    assert "band-pass 0.5" in movie._filt_label.text()
-    assert "5 Hz" in movie._filt_label.text()
+    movie.bandpass.hp_edit.setText("0.5")
+    movie.bandpass.lp_edit.setText("5")
+    movie.bandpass.apply()
+    assert "band-pass 0.5" in movie.bandpass.label.text()
+    assert "5 Hz" in movie.bandpass.label.text()
 
 
 def test_filter_changes_the_displayed_frame(movie):
     before = movie.frame_image.copy()
-    movie._hp_edit.setText("1.0")
-    movie._apply_filter()
+    movie.bandpass.hp_edit.setText("1.0")
+    movie.bandpass.apply()
     assert not np.allclose(before, movie.frame_image)
 
 
@@ -256,8 +381,8 @@ def test_filter_invalidates_the_prefetch_block(movie):
     assert movie._block is not None
     stale = movie.frame_image.copy()
 
-    movie._hp_edit.setText("1.0")
-    movie._apply_filter()
+    movie.bandpass.hp_edit.setText("1.0")
+    movie.bandpass.apply()
 
     fresh = movie._flat_u @ np.asarray(movie._v32)[:, movie.frame]
     np.testing.assert_allclose(movie.frame_image, fresh.reshape(movie.shape), rtol=1e-5, atol=1e-6)
@@ -267,62 +392,62 @@ def test_filter_invalidates_the_prefetch_block(movie):
 def test_filter_updates_the_pixel_traces(movie):
     movie.set_pixel(4, 4)
     before = movie._pixel_traces[0].copy()
-    movie._hp_edit.setText("1.0")
-    movie._apply_filter()
+    movie.bandpass.hp_edit.setText("1.0")
+    movie.bandpass.apply()
     assert not np.allclose(before, movie._pixel_traces[0])
 
 
 def test_filter_reapplies_from_the_raw_components(movie):
     """Applying twice must not compound: the second result is derived from the original V."""
-    movie._hp_edit.setText("1.0")
-    movie._apply_filter()
+    movie.bandpass.hp_edit.setText("1.0")
+    movie.bandpass.apply()
     once = np.asarray(movie._v32).copy()
-    movie._apply_filter()
+    movie.bandpass.apply()
     np.testing.assert_allclose(np.asarray(movie._v32), once, atol=1e-6)
 
 
 def test_filter_reset_restores_the_raw_components(movie, movie_data):
     _, v, _, _ = movie_data
-    movie._hp_edit.setText("1.0")
-    movie._apply_filter()
-    movie._reset_filter()
-    assert movie._hp_edit.text() == "0" and movie._lp_edit.text() == "inf"
+    movie.bandpass.hp_edit.setText("1.0")
+    movie.bandpass.apply()
+    movie.bandpass.reset()
+    assert movie.bandpass.hp_edit.text() == "0" and movie.bandpass.lp_edit.text() == "inf"
     np.testing.assert_allclose(np.asarray(movie._v32), v, atol=1e-5)
 
 
 def test_filter_rejects_inverted_cutoffs(movie):
-    movie._hp_edit.setText("5")
-    movie._lp_edit.setText("1")
-    movie._apply_filter()
-    assert "invalid" in movie._filt_label.text()
+    movie.bandpass.hp_edit.setText("5")
+    movie.bandpass.lp_edit.setText("1")
+    movie.bandpass.apply()
+    assert "invalid" in movie.bandpass.label.text()
 
 
 def test_filter_rejects_unparseable_text(movie):
-    movie._hp_edit.setText("banana")
-    movie._apply_filter()
-    assert "invalid" in movie._filt_label.text()
+    movie.bandpass.hp_edit.setText("banana")
+    movie.bandpass.apply()
+    assert "invalid" in movie.bandpass.label.text()
 
 
 def test_filter_survives_a_bad_value_without_changing_v(movie, movie_data):
     _, v, _, _ = movie_data
-    movie._hp_edit.setText("nonsense")
-    movie._apply_filter()
+    movie.bandpass.hp_edit.setText("nonsense")
+    movie.bandpass.apply()
     np.testing.assert_allclose(np.asarray(movie._v32), v, atol=1e-5)
 
 
 def test_lowpass_above_nyquist_is_treated_as_no_filter(movie, movie_data):
     _, v, _, _ = movie_data
-    movie._lp_edit.setText("1000")
-    movie._apply_filter()
-    assert "unfiltered" in movie._filt_label.text()
+    movie.bandpass.lp_edit.setText("1000")
+    movie.bandpass.apply()
+    assert "unfiltered" in movie.bandpass.label.text()
     np.testing.assert_allclose(np.asarray(movie._v32), v, atol=1e-5)
 
 
 def test_blank_cutoff_boxes_mean_no_filter(movie):
-    movie._hp_edit.setText("")
-    movie._lp_edit.setText("")
-    movie._apply_filter()
-    assert "unfiltered" in movie._filt_label.text()
+    movie.bandpass.hp_edit.setText("")
+    movie.bandpass.lp_edit.setText("")
+    movie.bandpass.apply()
+    assert "unfiltered" in movie.bandpass.label.text()
 
 
 # ===================================================================== follow / zoom

@@ -25,6 +25,7 @@ __all__ = [
     "run_app",
     "clamp",
     "install_hotkeys",
+    "make_bandpass_control",
     "text_entry_focused",
 ]
 
@@ -167,6 +168,125 @@ def require_qt():
     # numpy's (row, col) is (y, x); without this pyqtgraph transposes every image.
     pg.setConfigOptions(imageAxisOrder="row-major")
     return pg, QtCore, QtGui, QtWidgets
+
+
+def make_bandpass_control(v_raw, fs, on_apply, order: int = 3):
+    """A row of band-pass controls: high-pass / low-pass cutoffs, Apply, Reset, status.
+
+    Shared by the viewers rather than duplicated, so the parsing rules, the Nyquist handling and
+    the status wording stay identical everywhere.
+
+    ``v_raw`` is the *unfiltered* ``(nSV, nFrames)`` components. Every Apply filters those, never
+    the previous result, so repeated Applies do not compound. ``on_apply(filtered_v, description)``
+    is called with the result; raising inside it is left to propagate, since that is a bug in the
+    caller rather than bad user input.
+
+    Filtering ``V`` filters every pixel (reconstruction is linear in time), which is what makes an
+    interactive control affordable at all.
+
+    Returns the control widget. It exposes ``hp_edit``, ``lp_edit``, ``label``, ``apply()``,
+    ``reset()`` and ``description``.
+    """
+    _pg, QtCore, _QtGui, QtWidgets = require_qt()
+
+    from widefield.svd import bandpass_filt
+
+    nyquist = float(fs) / 2.0
+
+    class BandpassControl(QtWidgets.QWidget):
+        def __init__(self):
+            super().__init__()
+            row = QtWidgets.QHBoxLayout(self)
+            row.setContentsMargins(0, 0, 0, 0)
+
+            row.addWidget(QtWidgets.QLabel("Band-pass — high-pass (Hz):"))
+            self.hp_edit = QtWidgets.QLineEdit("0")
+            self.hp_edit.setFixedWidth(70)
+            self.hp_edit.setToolTip("Lower cutoff in Hz. 0 means no high-pass.")
+            row.addWidget(self.hp_edit)
+
+            row.addWidget(QtWidgets.QLabel("low-pass (Hz):"))
+            self.lp_edit = QtWidgets.QLineEdit("inf")
+            self.lp_edit.setFixedWidth(70)
+            self.lp_edit.setToolTip(
+                f"Upper cutoff in Hz. inf means no low-pass (Nyquist is {nyquist:.2f} Hz)."
+            )
+            row.addWidget(self.lp_edit)
+
+            apply_btn = QtWidgets.QPushButton("Apply")
+            apply_btn.setFixedWidth(70)
+            apply_btn.clicked.connect(self.apply)
+            row.addWidget(apply_btn)
+
+            reset_btn = QtWidgets.QPushButton("Reset")
+            reset_btn.setFixedWidth(70)
+            reset_btn.clicked.connect(self.reset)
+            row.addWidget(reset_btn)
+
+            self.label = QtWidgets.QLabel("unfiltered")
+            self.label.setStyleSheet("color: gray;")
+            row.addWidget(self.label)
+            row.addStretch(1)
+
+            # Enter in either box applies — what you expect after typing a number.
+            self.hp_edit.returnPressed.connect(self.apply)
+            self.lp_edit.returnPressed.connect(self.apply)
+
+            self.description = "unfiltered"
+
+        @staticmethod
+        def _parse(text: str, default: float) -> float:
+            text = text.strip().lower()
+            if text in ("", "none"):
+                return default
+            if text in ("inf", "+inf", "infinity"):
+                return float("inf")
+            return float(text)
+
+        def cutoffs(self) -> tuple[float, float]:
+            """``(highpass, lowpass)`` as currently typed. Raises ValueError on junk."""
+            return (
+                self._parse(self.hp_edit.text(), 0.0),
+                self._parse(self.lp_edit.text(), float("inf")),
+            )
+
+        def apply(self) -> None:
+            try:
+                hp, lp = self.cutoffs()
+                filtered = bandpass_filt(v_raw, fs, highpass=hp, lowpass=lp, order=order)
+            except ValueError as exc:
+                self.label.setText(f"invalid: {exc}")
+                self.label.setStyleSheet("color: #cc4444;")
+                return
+
+            active_hp = hp > 0
+            active_lp = np.isfinite(lp) and lp < nyquist
+            if active_hp and active_lp:
+                desc = f"band-pass {hp:g}–{lp:g} Hz"
+            elif active_hp:
+                desc = f"high-pass {hp:g} Hz"
+            elif active_lp:
+                desc = f"low-pass {lp:g} Hz"
+            else:
+                desc = "unfiltered"
+            self.description = desc
+            self.label.setText(f"{desc} (Butterworth order {order}, zero-phase)")
+            self.label.setStyleSheet("color: gray;")
+
+            # A rebuild can be slow (the correlation viewer re-does its covariance), so show a
+            # wait cursor rather than looking hung.
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+            try:
+                on_apply(filtered, desc)
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
+
+        def reset(self) -> None:
+            self.hp_edit.setText("0")
+            self.lp_edit.setText("inf")
+            self.apply()
+
+    return BandpassControl()
 
 
 def text_entry_focused(widget) -> bool:

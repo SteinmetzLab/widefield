@@ -9,13 +9,19 @@ MATLAB parity
 click                          set the seed pixel
 arrow keys                     move the seed 5 px (1 px with Ctrl)
 ``v``                          toggle variance normalization (emphasize strong-signal areas)
-``h``                          toggle hover mode (recompute continuously under the cursor)
+``h``                          toggle hover mode (**on by default** here; see below)
 alt + left/right               rotate the image 90 degrees
 alt + up/down                  flip vertically
 ============================  ==========================================================
 
 Additions over the MATLAB: a live value readout, the seed's own timecourse underneath (the
-thing you usually check next), ``r`` to reset the orientation, and ``s`` to save the map.
+thing you usually check next), a **temporal band-pass** (removing the slow drift before
+correlating usually sharpens the functional boundaries; restricting to a band asks which
+timescale the structure lives on), ``r`` to reset the orientation, and ``s`` to save the map.
+
+Hover is **on by default**, unlike the MATLAB: a map costs ~9 ms, so sweeping the mouse over
+cortex and watching the structure move is the fastest way to read a session. Pass
+``hover=False``, or press ``h``, to go back to click-to-place.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from widefield.gui._common import (
     Orientation,
     ensure_app,
     install_hotkeys,
+    make_bandpass_control,
     require_qt,
     run_app,
     text_entry_focused,
@@ -47,30 +54,55 @@ def _build():
     class PixelCorrelationViewer(QtWidgets.QWidget):
         """Widget form, so this can be embedded (e.g. in DataBrowser) as well as run standalone."""
 
-        def __init__(self, u, v, t=None, max_components=None, parent=None):
+        def __init__(self, u, v, t=None, max_components=None, hover=True, parent=None):
             super().__init__(parent)
             self._u = np.asarray(u)
-            self._v = np.asarray(v)
+            self._v_raw = np.asarray(v)
+            self._v = self._v_raw
             self._t = None if t is None else np.asarray(t, dtype=float).ravel()
+            self._max_components = max_components
             self.shape = (int(self._u.shape[0]), int(self._u.shape[1]))
+            self._fs = (
+                float(1.0 / np.median(np.diff(self._t)))
+                if self._t is not None and self._t.size > 1
+                else 1.0
+            )
 
             self._orient = Orientation()
             self._pixel = (self.shape[0] // 2, self.shape[1] // 2)
             self._normalize_by_max = False
-            self._hover = False
+            # Hover on by default: a map takes ~9 ms, so sweeping the mouse over cortex and
+            # watching the correlation structure move is the fastest way to read a session. The
+            # MATLAB defaults it off (its maps were slower); 'h' still toggles.
+            self._hover = bool(hover)
 
             self.setWindowTitle("Pixel correlation (SVD)")
             self._build_ui(pg, QtWidgets)
+            self._rebuild_correlation()
+            self._refresh(full=True)
 
-            # Precompute is the slow step (cov of V, then per-pixel variance). Show a wait
-            # cursor rather than looking hung; on a real session this is a few seconds.
+        def _rebuild_correlation(self) -> None:
+            """(Re)compute the covariance precompute. The slow step — a few seconds on a real
+            session — so it shows a wait cursor rather than looking hung."""
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
             try:
-                self._corr = SeedCorrelation(self._u, self._v, max_components=max_components)
+                self._corr = SeedCorrelation(self._u, self._v, max_components=self._max_components)
             finally:
                 QtWidgets.QApplication.restoreOverrideCursor()
 
-            self._refresh(full=True)
+        def _on_filtered(self, filtered_v, _description) -> None:
+            """Band-passed components change the covariance, so the whole precompute is redone.
+
+            Worth the wait: removing the slow drift before correlating usually sharpens the
+            functional boundaries considerably, and restricting to a band is how you ask which
+            timescale the correlation structure lives on.
+            """
+            # float32 to match the unfiltered path: bandpass_filt works in float64, and keeping
+            # that would double the memory and slow every pixel-timecourse redraw for no
+            # visible gain on a map scaled to [-1, 1].
+            self._v = np.asarray(filtered_v, dtype=np.float32)
+            self._rebuild_correlation()
+            self._refresh()
 
         # ---------------------------------------------------------------- construction
 
@@ -109,13 +141,21 @@ def _build():
             self._trace_plot.setLabel("left", "Activity")
             self._trace_curve = self._trace_plot.plot(pen=pg.mkPen((0, 204, 0), width=1))
 
+            self.bandpass = make_bandpass_control(self._v_raw, self._fs, self._on_filtered)
+            if self._t is None:
+                # Without timestamps the cutoffs would be in cycles/frame, which nobody wants to
+                # reason about; hide the control rather than offer a misleading axis.
+                self.bandpass.setVisible(False)
+                self.bandpass.setToolTip("Needs frame times to know the sampling rate")
+            layout.addWidget(self.bandpass)
+
             self._status = QtWidgets.QLabel()
             self._status.setTextFormat(QtCore.Qt.PlainText)
             layout.addWidget(self._status)
 
             hint = QtWidgets.QLabel(
-                "click / arrows: move seed (Ctrl = 1 px) · v: variance norm · h: hover · "
-                "alt+arrows: rotate/flip · r: reset view · s: save map"
+                "hover or click / arrows: move seed (ctrl = 1 px) · v: variance norm · "
+                "h: toggle hover · alt+arrows: rotate/flip · r: reset view · s: save map"
             )
             hint.setStyleSheet("color: gray;")
             hint.setWordWrap(True)
@@ -150,8 +190,12 @@ def _build():
             if pixel is None:
                 return
             if self._hover:
-                self._pixel = pixel
-                self._refresh()
+                # Qt emits many mouse-move events per pixel of travel, and a full refresh is
+                # ~30 ms on a real session. Recomputing only when the *pixel* changes keeps hover
+                # smooth instead of letting redraws queue up behind the mouse.
+                if pixel != self._pixel:
+                    self._pixel = pixel
+                    self._refresh()
             else:
                 # Even without hover mode, report the value under the cursor.
                 self._update_status(cursor=pixel)
@@ -250,8 +294,12 @@ def _build():
             bits.append(
                 "normalized by max variance" if self._normalize_by_max else "true correlation"
             )
-            if self._hover:
-                bits.append("HOVER ON")
+            bits.append("hover on" if self._hover else "hover off")
+            if (
+                getattr(self, "bandpass", None) is not None
+                and self.bandpass.description != "unfiltered"
+            ):
+                bits.append(self.bandpass.description)
             if self._orient.rot or self._orient.flip:
                 bits.append(
                     f"rot {self._orient.rot * 90}deg{' flipped' if self._orient.flip else ''}"
@@ -317,6 +365,7 @@ def pixel_correlation_viewer(
     v: np.ndarray,
     t: np.ndarray | None = None,
     max_components: int | None = None,
+    hover: bool = True,
     block: bool = True,
 ):
     """Open the seed-pixel correlation viewer. Equivalent to ``pixelCorrelationViewerSVD(U, V)``.
@@ -327,6 +376,7 @@ def pixel_correlation_viewer(
     v : (nSV, nFrames) temporal components.
     t : optional frame times, used to label the seed's timecourse.
     max_components : cap the components used, to bound the precompute on huge sessions.
+    hover : recompute the map continuously under the cursor. On by default; ``h`` toggles it.
     block : run the Qt event loop until the window closes. Set False when embedding, or when
         driving the widget from code.
 
@@ -335,7 +385,7 @@ def pixel_correlation_viewer(
     The viewer widget, so callers can keep a reference or inspect it.
     """
     app = ensure_app()
-    viewer = _get_class()(u, v, t=t, max_components=max_components)
+    viewer = _get_class()(u, v, t=t, max_components=max_components, hover=hover)
     viewer.resize(760, 820)
     viewer.show()
     viewer.setFocus()

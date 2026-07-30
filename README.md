@@ -85,13 +85,22 @@ the key table. Deliberate differences:
 - **`hemo_correct_*` do not plot.** The MATLAB versions pop figures mid-computation, which makes
   them unusable in a batch pipeline; the scale-factor map and transform are returned instead.
 
+- **Hover is on by default in the correlation viewer.** A map costs ~9 ms, so sweeping the mouse
+  over cortex and watching the structure move is the fastest way to read a session. `h` toggles it;
+  pass `hover=False` for the MATLAB's click-to-place behavior.
+
 Hotkeys work wherever focus happens to be inside the window — except while the caret is in a text
 box, where they stay out of the way.
 
-Additions to the movie viewer beyond the MATLAB: a **temporal band-pass** (type cutoffs in Hz;
-filtering `V` filters every pixel, so it re-applies in well under a second), a **Follow** toggle so
-a manual zoom on the trace plots survives playback instead of being reset every frame, a scrub
-slider, and `nsv_display` to cap components per frame if full-rank playback stutters.
+Both the movie and correlation viewers have a **temporal band-pass**: type cutoffs in Hz (0 and
+`inf` by default). Filtering `V` filters every pixel, so it re-applies quickly. In the correlation
+viewer it changes the covariance and so rebuilds the precompute — worth it, because removing the
+slow drift before correlating usually sharpens the functional boundaries, and restricting to a band
+is how you ask which timescale the correlation structure lives on.
+
+Also in the movie viewer: a **Follow** toggle so a manual zoom on the trace plots survives playback
+instead of being reset every frame, a scrub slider, and `nsv_display` to cap components per frame
+if full-rank playback stutters.
 
 ### Performance
 

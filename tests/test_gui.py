@@ -117,11 +117,19 @@ def test_corr_v_key_toggles_variance_normalization(corr_viewer, movie_data):
     np.testing.assert_allclose(corr_viewer.correlation_map, true_corr, atol=1e-9)
 
 
+def test_corr_hover_is_on_by_default(corr_viewer):
+    """Unlike the MATLAB: a map costs ~9 ms, so sweeping the mouse is the fastest way to read."""
+    assert corr_viewer._hover is True
+    assert "hover on" in corr_viewer._status.text()
+
+
 def test_corr_h_key_toggles_hover(corr_viewer):
+    assert corr_viewer._hover is True
+    press(corr_viewer, QtCore.Qt.Key_H)
     assert corr_viewer._hover is False
+    assert "hover off" in corr_viewer._status.text()
     press(corr_viewer, QtCore.Qt.Key_H)
     assert corr_viewer._hover is True
-    assert "HOVER" in corr_viewer._status.text()
 
 
 def test_corr_alt_arrows_rotate_and_transpose_the_display(corr_viewer):
