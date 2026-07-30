@@ -4,6 +4,7 @@
     python examples/try_viewers.py --session "Y:\\Subjects\\ZYE_0057\\2022-01-10\\1"
     python examples/try_viewers.py --demo                 # synthetic data, no server needed
     python examples/try_viewers.py --nsv 500              # more components (slower load)
+    python examples/try_viewers.py --only movie           # just one viewer (movie/corr/tuning/svd)
 
 Windows are tiled across the screen. Each is independent; the process exits when you close them
 all. Keyboard shortcuts are listed along the bottom of each window and in the module docstrings.
@@ -74,6 +75,33 @@ def load_timeline_trace(session: Path, name: str):
         return t, v
     except Exception as exc:
         log.warning("could not read Timeline channel %r (%s)", name, exc)
+        return None
+
+
+def laser_trace(session: Path):
+    """A 0/power step trace of laser pulses, for opto sessions. ``None`` if not one.
+
+    Built from ``laserOnTimes``/``laserOffTimes`` (+ ``laserPowers`` when present) as an explicit
+    staircase, so the movie viewer's scrolling window shows exactly when the laser was on and how
+    hard, against the activity it drove.
+    """
+    on_p, off_p = session / "laserOnTimes.npy", session / "laserOffTimes.npy"
+    if not (on_p.exists() and off_p.exists()):
+        return None
+    try:
+        on = np.asarray(np.load(on_p)).ravel()
+        off = np.asarray(np.load(off_p)).ravel()
+        n = min(on.size, off.size)
+        on, off = on[:n], off[:n]
+        power_p = session / "laserPowers.npy"
+        power = np.asarray(np.load(power_p)).ravel()[:n] if power_p.exists() else np.ones(n)
+        # Four points per pulse: rise, hold, fall, off. Sorted because a plot needs monotone x.
+        t = np.concatenate([on, on, off, off])
+        v = np.concatenate([np.zeros(n), power, power, np.zeros(n)])
+        order = np.argsort(t, kind="stable")
+        return t[order], v[order], n
+    except Exception as exc:
+        log.warning("could not read laser times (%s)", exc)
         return None
 
 
@@ -158,11 +186,14 @@ def demo_data():
 
 
 def tile(windows, app):
-    """Lay the windows out in a 2x2 grid on the primary screen."""
+    """Lay the windows out on the primary screen: one fills it, two split it, more go 2x2."""
     geo = app.primaryScreen().availableGeometry()
-    w, h = geo.width() // 2, geo.height() // 2
+    n = len(windows)
+    cols = 1 if n == 1 else 2
+    rows = 1 if n <= 2 else 2
+    w, h = geo.width() // cols, geo.height() // rows
     for i, win in enumerate(windows):
-        col, row = i % 2, i // 2
+        col, row = i % cols, i // cols
         win.resize(w - 20, h - 40)
         win.move(geo.x() + col * w + 10, geo.y() + row * h + 10)
         win.show()
@@ -178,6 +209,12 @@ def main() -> int:
     ap.add_argument("--demo", action="store_true", help="synthetic data; no server needed")
     ap.add_argument("--nsv", type=int, default=200, help="components to load (default 200)")
     ap.add_argument("--calc-win", type=float, nargs=2, default=(-0.3, 0.8), metavar=("T0", "T1"))
+    ap.add_argument(
+        "--only",
+        nargs="+",
+        choices=["svd", "corr", "tuning", "movie"],
+        help="open only these viewers (default: all four)",
+    )
     ap.add_argument(
         "--no-exec",
         action="store_true",
@@ -208,11 +245,17 @@ def main() -> int:
         if sv is None:
             sv, total_var = v.var(axis=1), None
 
-        # The movie viewer's default color scale assumes dF/F, so give it dF/F.
-        blue = wf.load_uvt(session, nsv=args.nsv, channel="blue")
-        log.info("  computing dF/F ...")
-        dff_u, dff_v = wf.dff_from_svd(blue.u, blue.v, blue.mean_image)
-        t_movie = blue.t
+        # The movie viewer's default color scale assumes dF/F, so give it dF/F. Skipped
+        # entirely when the movie viewer is not being opened — it is the expensive step.
+        dff_u = dff_v = t_movie = None
+        if args.only is None or "movie" in args.only:
+            blue = wf.load_uvt(session, nsv=args.nsv, channel="blue")
+            log.info("  computing dF/F ...")
+            dff_u, dff_v = wf.dff_from_svd(blue.u, blue.v, blue.mean_image)
+            # float32 halves the resident size; on a 92-minute session dff_v is 311 MB in
+            # float64 and the viewer only ever displays it.
+            dff_v = np.asarray(dff_v, dtype=np.float32)
+            t_movie = blue.t
 
         extra_traces = []
         for name, label in (("rotaryEncoder", "wheel"), ("photodiode", "photodiode")):
@@ -221,53 +264,88 @@ def main() -> int:
                 # Decimate: these run at ~2 kHz for 11 minutes and only ~10 s is ever on screen.
                 tt, vv = got
                 extra_traces.append(Trace(t=tt[::10], v=vv[::10], name=label))
+        laser = laser_trace(session)
+        if laser is not None:
+            lt, lv, n_pulses = laser
+            extra_traces.append(Trace(t=lt, v=lv, name=f"laser ({n_pulses} pulses)"))
+            log.info("  opto session: %d laser pulses", n_pulses)
         log.info("  behavioral traces: %s", [tr.name for tr in extra_traces] or "none found")
 
-    event_times, event_labels, event_source = make_events(session, t, rng)
-    log.info("  tuning events: %s", event_source)
+    wanted = set(args.only) if args.only else {"svd", "corr", "tuning", "movie"}
+
+    # Only the tuning viewer needs events, and finding them reads a ~90 MB photodiode trace.
+    event_times = event_labels = None
+    event_source = "not needed"
+    if "tuning" in wanted:
+        event_times, event_labels, event_source = make_events(session, t, rng)
+        log.info("  tuning events: %s", event_source)
 
     windows = []
 
-    log.info("building SVD component browser ...")
-    w_svd = svd_class()(u, sv, v, fs=fs, total_variance=total_var)
-    w_svd.setWindowTitle("1. SVD viewer  —  svdViewer")
-    windows.append(w_svd)
+    if "svd" in wanted:
+        log.info("building SVD component browser ...")
+        w_svd = svd_class()(u, sv, v, fs=fs, total_variance=total_var)
+        w_svd.setWindowTitle("1. SVD viewer  —  svdViewer")
+        windows.append(w_svd)
 
-    log.info("building correlation viewer (precomputing covariance) ...")
-    w_corr = corr_class()(u, v, t=t)
-    w_corr.setWindowTitle("2. Pixel correlation  —  pixelCorrelationViewerSVD")
-    windows.append(w_corr)
+    if "corr" in wanted:
+        log.info("building correlation viewer (precomputing covariance) ...")
+        w_corr = corr_class()(u, v, t=t)
+        w_corr.setWindowTitle("2. Pixel correlation  —  pixelCorrelationViewerSVD")
+        windows.append(w_corr)
 
-    log.info("building tuning viewer (event-locked average) ...")
-    w_tun = tuning_class()(u, v, t, event_times, event_labels, tuple(args.calc_win))
-    w_tun.setWindowTitle(f"3. Pixel tuning  —  pixelTuningCurveViewerSVD  [{event_source}]")
-    windows.append(w_tun)
+    if "tuning" in wanted:
+        log.info("building tuning viewer (event-locked average) ...")
+        w_tun = tuning_class()(u, v, t, event_times, event_labels, tuple(args.calc_win))
+        w_tun.setWindowTitle(f"3. Pixel tuning  —  pixelTuningCurveViewerSVD  [{event_source}]")
+        windows.append(w_tun)
 
-    log.info("building movie viewer ...")
-    pixel_trace = wf.pixel_timecourse(u, v, (u.shape[0] // 2, u.shape[1] // 2))
-    traces = [Trace(t=t, v=pixel_trace, name="center pixel"), *extra_traces]
-    w_movie = movie_class()(
-        dff_u,
-        dff_v,
-        t=t if args.demo else t_movie,
-        traces=traces,
-    )
-    w_movie.setWindowTitle("4. Movie with traces  —  movieWithTracesSVD")
-    windows.append(w_movie)
+    if "movie" in wanted:
+        log.info("building movie viewer ...")
+        # Take the reference trace from the arrays actually displayed (blue dF/F), not from the
+        # corr channel used by the other viewers — otherwise the trace and the movie are different
+        # data on slightly different clocks, which is needlessly confusing.
+        t_disp = t if args.demo else t_movie
+        centre = (dff_u.shape[0] // 2, dff_u.shape[1] // 2)
+        pixel_trace = wf.pixel_timecourse(dff_u, dff_v, centre)
+        traces = [
+            Trace(t=t_disp, v=pixel_trace, name=f"center pixel {centre} dF/F"),
+            *extra_traces,
+        ]
+        w_movie = movie_class()(
+            dff_u,
+            dff_v,
+            t=t_disp,
+            traces=traces,
+        )
+        w_movie.setWindowTitle("4. Movie with traces  —  movieWithTracesSVD")
+        windows.append(w_movie)
 
     tile(windows, app)
 
+    TIPS = {
+        "svd": ["SVD viewer      left/right to page components; p then click for pixel mode"],
+        "corr": [
+            "Correlation     just move the mouse (hover is on); h toggles it; v for",
+            "                variance normalization; try a 1 Hz high-pass",
+        ],
+        "tuning": ["Tuning          click all three panels; p to play; r for an ROI; ijkl"],
+        "movie": [
+            "Movie           p to play; ctrl+click to add pixels; -/= color scale;",
+            "                type band-pass cutoffs in Hz; Follow keeps a zoom on playback",
+        ],
+    }
     log.info("")
-    log.info("All four open. Things worth trying:")
-    log.info("  1 SVD viewer      left/right to page components; p then click for pixel mode")
-    log.info("  2 Correlation     just move the mouse (hover is on); h toggles it; v for")
-    log.info("                    variance normalization; try a 1 Hz high-pass")
-    log.info("  3 Tuning          click all three panels; p to play; r for an ROI; ijkl")
-    log.info("  4 Movie           p to play; ctrl+click to add pixels; -/= color scale;")
-    log.info("                    type band-pass cutoffs in Hz; Follow keeps a zoom on playback")
-    log.info("  any               alt+arrows to rotate/flip; hotkeys work with any focus")
+    log.info(
+        "%d window%s open. Things worth trying:", len(windows), "" if len(windows) == 1 else "s"
+    )
+    for key in ("svd", "corr", "tuning", "movie"):
+        if key in wanted:
+            for line in TIPS[key]:
+                log.info("  %s", line)
+    log.info("  %s", "any             alt+arrows to rotate/flip; hotkeys work with any focus")
     log.info("")
-    log.info("Close all four windows to exit.")
+    log.info("Close the window%s to exit.", "" if len(windows) == 1 else "s")
     if args.no_exec:
         log.info("(--no-exec: built OK, exiting without showing anything)")
         return 0

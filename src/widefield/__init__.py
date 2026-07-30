@@ -52,6 +52,7 @@ from widefield.hemo import (
 from widefield.io import UVData, discover_channels, load_uvt
 from widefield.signals import schmitt, schmitt_times
 from widefield.svd import (
+    bandpass_filt,
     bin_image,
     change_u,
     detrend_and_filt,
@@ -75,6 +76,7 @@ __all__ = [
     "change_u",
     "dff_from_svd",
     "hp_filt",
+    "bandpass_filt",
     "detrend_and_filt",
     "subsample_shift",
     "bin_image",

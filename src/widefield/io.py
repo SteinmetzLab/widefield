@@ -204,6 +204,36 @@ class Channel:
     timestamps: Path | None
     mean_image: Path | None
     data_summary: Path | None
+    # Session-level frame bookkeeping: every exposure's time, plus a 0/1 flag per exposure
+    # marking the ones belonging to this channel. Preferred over `timestamps` — see
+    # `frame_times_from_indexes`.
+    frame_times: Path | None = None
+    frame_indexes: Path | None = None
+
+    def frame_times_from_indexes(self) -> np.ndarray | None:
+        """Frame times derived from ``frameTimes`` + this channel's exposure flags.
+
+        This is how ``Pipelines/widefield/hemoCorrect.m`` gets its time base
+        (``tb = frameTimes(bfIdx == 1)``), and it is more trustworthy than the per-channel
+        ``svdTemporalComponents.timestamps.npy``: that file is written separately and can be
+        stale. On ``AB_0032/2024-07-24/1`` it carries 194678 entries for 194264 blue frames —
+        414 too many — while the index route gives exactly 194264.
+
+        Returns ``None`` when either file is missing.
+        """
+        if self.frame_times is None or self.frame_indexes is None:
+            return None
+        times = np.asarray(np.load(self.frame_times, allow_pickle=False)).ravel()
+        flags = np.asarray(np.load(self.frame_indexes, allow_pickle=False)).ravel()
+        if times.size != flags.size:
+            log.warning(
+                "%s: frameTimes has %d entries but the exposure flags have %d; ignoring them",
+                self.name,
+                times.size,
+                flags.size,
+            )
+            return None
+        return times[flags == 1]
 
     @property
     def image_shape(self) -> tuple[int, int]:
@@ -231,6 +261,8 @@ def discover_channels(session_path: Path | str) -> dict[str, Channel]:
     def opt(p: Path) -> Path | None:
         return p if p.exists() else None
 
+    frame_times = opt(session_path / "frameTimes.timestamps.npy")
+
     for name in ("blue", "violet"):
         d = session_path / name
         spatial = d / "svdSpatialComponents.npy"
@@ -243,6 +275,8 @@ def discover_channels(session_path: Path | str) -> dict[str, Channel]:
                 timestamps=opt(d / "svdTemporalComponents.timestamps.npy"),
                 mean_image=opt(d / "meanImage.npy"),
                 data_summary=opt(d / "dataSummary.mat"),
+                frame_times=frame_times,
+                frame_indexes=opt(session_path / f"{name}Frames.indexes.npy"),
             )
 
     corr = session_path / "corr" / "svdTemporalComponents_corr.npy"
@@ -324,6 +358,55 @@ def _cached(src: Path, tag: str, build: Callable[[], np.ndarray], use_cache: boo
     return arr
 
 
+def _frame_times(ch: Channel, n_frames: int) -> np.ndarray | None:
+    """Best available time base for ``n_frames`` frames of ``ch``, or ``None``.
+
+    Two sources, tried in order of trustworthiness:
+
+    1. ``frameTimes.timestamps.npy`` filtered by this channel's exposure flags — what the
+       production MATLAB uses, and self-consistent by construction.
+    2. the per-channel ``svdTemporalComponents.timestamps.npy``.
+
+    Whichever is used, a single trailing extra sample is dropped silently (a final exposure that
+    never made it into the SVD; real sessions do this routinely). A larger mismatch is truncated
+    to the frame count *and warned about loudly*, because it means the times may be misaligned
+    with the frames rather than merely one short — but returning something usable beats refusing
+    to open the session.
+    """
+    candidates = []
+    from_indexes = ch.frame_times_from_indexes()
+    if from_indexes is not None:
+        candidates.append(("frame indexes", from_indexes))
+    if ch.timestamps is not None:
+        candidates.append(
+            ("timestamps file", np.asarray(np.load(ch.timestamps, allow_pickle=False)).ravel())
+        )
+    if not candidates:
+        return None
+
+    # Prefer any source that already agrees exactly (or is one long).
+    for label, times in candidates:
+        if times.size == n_frames:
+            log.debug("%s: using %s (%d frames)", ch.name, label, n_frames)
+            return times
+    for label, times in candidates:
+        if times.size == n_frames + 1:
+            log.debug("%s: using %s, dropping 1 trailing sample", ch.name, label)
+            return times[:-1]
+
+    label, times = candidates[0]
+    log.warning(
+        "%s: %s has %d entries for %d frames (%+d); truncating to the frame count. "
+        "Frame times may be misaligned — check the preprocessing for this session.",
+        ch.name,
+        label,
+        times.size,
+        n_frames,
+        times.size - n_frames,
+    )
+    return times[:n_frames] if times.size > n_frames else times
+
+
 def load_uvt(
     session_path: Path | str,
     nsv: int | None = None,
@@ -378,21 +461,7 @@ def load_uvt(
         use_cache,
     )
 
-    t = None
-    if ch.timestamps is not None:
-        t = np.asarray(np.load(ch.timestamps, allow_pickle=False)).ravel()
-        # The blue channel can carry one more frame than V (a trailing exposure that never
-        # made it into the SVD); loadUVt.m has this same guard commented out, but real
-        # sessions do exhibit it (23075 timestamps vs 23074 corrected frames).
-        if t.size == v.shape[1] + 1:
-            t = t[:-1]
-        elif t.size != v.shape[1]:
-            log.warning(
-                "%s: %d timestamps for %d frames — leaving both as-is",
-                ch.name,
-                t.size,
-                v.shape[1],
-            )
+    t = _frame_times(ch, v.shape[1])
 
     mean_image = None
     if ch.mean_image is not None:

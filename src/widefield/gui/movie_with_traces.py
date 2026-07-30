@@ -174,7 +174,10 @@ def _build():
             self._flat_u = flatten_u(self._u[..., :nsv]).astype(np.float32, copy=False)
             # Keep the unfiltered components: the band-pass control re-derives _v32 from these,
             # so filtering is always a single pass from the original rather than compounding.
-            self._v_raw = np.asarray(self._v[:nsv], dtype=np.float64)
+            # Left in the input dtype (float32 off disk) rather than promoted: bandpass_filt
+            # promotes internally anyway, and forcing float64 here doubled the resident size to
+            # 311 MB on a 92-minute session for no change in the result.
+            self._v_raw = np.asarray(self._v[:nsv])
             self._v32 = np.asfortranarray(self._v[:nsv], dtype=np.float32)
             self._block_start = -1
             self._block: np.ndarray | None = None
