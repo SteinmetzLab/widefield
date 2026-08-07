@@ -53,8 +53,49 @@ def test_blue_white_red_is_white_in_the_middle():
     np.testing.assert_allclose(m[m.shape[0] // 2], [1, 1, 1], atol=1e-12)
 
 
-def test_condition_colors_reverses_copper_channels():
-    np.testing.assert_allclose(cm.condition_colors(4), cm.copper(4)[:, ::-1], atol=1e-12)
+def test_condition_colors_matlab_scheme_reverses_copper_channels():
+    np.testing.assert_allclose(
+        cm.condition_colors(4, scheme="matlab"), cm.copper(4)[:, ::-1], atol=1e-12
+    )
+
+
+def test_matlab_condition_colors_start_at_pure_black():
+    """Why 'matlab' is not the default: its first entry is invisible on a dark background."""
+    np.testing.assert_allclose(cm.condition_colors(4, scheme="matlab")[0], [0, 0, 0], atol=1e-12)
+
+
+def test_bright_condition_colors_are_all_visible_on_black():
+    """Every entry must have real luminance, or a condition vanishes against the background."""
+    colors = cm.condition_colors(11)
+    lum = colors @ [0.2126, 0.7152, 0.0722]  # Rec. 709 relative luminance
+    assert lum.min() > 0.15, f"dimmest condition color has luminance {lum.min():.3f}"
+    assert colors.max() <= 1.0 and colors.min() >= 0.0
+
+
+def test_bright_condition_colors_are_distinguishable():
+    """Adjacent conditions must differ enough to tell apart."""
+    colors = cm.condition_colors(11)
+    gaps = np.linalg.norm(np.diff(colors, axis=0), axis=1)
+    assert gaps.min() > 0.05
+
+
+def test_condition_colors_single_condition():
+    assert cm.condition_colors(1).shape == (1, 3)
+
+
+def test_condition_colors_rejects_unknown_scheme():
+    with pytest.raises(ValueError, match="unknown scheme"):
+        cm.condition_colors(4, scheme="rainbow")
+
+
+def test_hsv_to_rgb_primaries():
+    got = cm.hsv_to_rgb(np.array([0.0, 1 / 3, 2 / 3]), 1.0, 1.0)
+    np.testing.assert_allclose(got, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], atol=1e-9)
+
+
+def test_hsv_to_rgb_zero_saturation_is_gray():
+    got = cm.hsv_to_rgb(np.linspace(0, 1, 7), 0.0, 0.6)
+    np.testing.assert_allclose(got, 0.6, atol=1e-9)
 
 
 def test_lookup_table_is_uint8_and_right_length():

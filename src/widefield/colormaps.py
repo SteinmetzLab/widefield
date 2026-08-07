@@ -83,13 +83,57 @@ def copper(m: int = 64) -> np.ndarray:
     return np.minimum(1.0, gray[:, None] * np.array([1.25, 0.7812, 0.4975]))
 
 
-def condition_colors(n_conditions: int) -> np.ndarray:
+def hsv_to_rgb(h: np.ndarray, s: float, v: float) -> np.ndarray:
+    """Vectorized HSV → RGB for hue array ``h`` in [0, 1) at constant ``s`` and ``v``."""
+    h = np.asarray(h, dtype=float) % 1.0
+    i = np.floor(h * 6.0).astype(int)
+    f = h * 6.0 - i
+    p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
+    full = np.full_like(h, v)
+    table = [
+        (full, t, np.full_like(h, p)),
+        (q, full, np.full_like(h, p)),
+        (np.full_like(h, p), full, t),
+        (np.full_like(h, p), q, full),
+        (t, np.full_like(h, p), full),
+        (full, np.full_like(h, p), q),
+    ]
+    out = np.empty((h.size, 3))
+    for k in range(6):
+        mask = i % 6 == k
+        for c in range(3):
+            out[mask, c] = np.asarray(table[k][c])[mask]
+    return out
+
+
+def condition_colors(n_conditions: int, scheme: str = "bright") -> np.ndarray:
     """Line colors for ``n_conditions`` tuning-curve traces.
 
-    ``pixelTuningCurveViewerSVD`` uses ``copper(n)`` with its channels reversed
-    (``colors(:, [3 2 1])``), turning the copper ramp into a black→pale-blue one.
+    ``"bright"`` (default) sweeps hue from light blue through cyan, green and yellow to red at
+    constant high saturation and value. Every entry is therefore bright, and the cool-to-warm
+    progression reads as an ordering — which matters when the conditions *are* ordered (contrast,
+    laser power).
+
+    ``"matlab"`` reproduces ``pixelTuningCurveViewerSVD``: ``copper(n)`` with its channels
+    reversed, a black→pale-blue ramp. Faithful, but its first entry is *pure black*, which is
+    invisible on the dark background these viewers use — which is why it is no longer the default.
+
+    Caveat: a hue sweep is not perceptually uniform and is poor for red-green color blindness.
+    That is an acceptable trade for an interactive viewer where you can select a condition and
+    see it highlighted; for a figure, prefer a perceptually uniform map.
     """
-    return copper(n_conditions)[:, ::-1].copy()
+    if scheme == "matlab":
+        return copper(n_conditions)[:, ::-1].copy()
+    if scheme != "bright":
+        raise ValueError(f"unknown scheme {scheme!r}; use 'bright' or 'matlab'")
+    if n_conditions < 1:
+        raise ValueError("n_conditions must be >= 1")
+    if n_conditions == 1:
+        return hsv_to_rgb(np.array([0.5]), 0.8, 1.0)
+    # 0.58 (azure) down to 0.0 (red). Starting below pure blue keeps the cool end from going
+    # dim against black.
+    hues = np.linspace(0.58, 0.0, n_conditions)
+    return hsv_to_rgb(hues, 0.8, 1.0)
 
 
 # ------------------------------------------------------------------ backend converters

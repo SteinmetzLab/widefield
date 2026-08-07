@@ -12,6 +12,7 @@ MATLAB parity
 ``r``                        start / stop recording (needs ``movie_save_path``)
 up / down                    double / halve playback **speed** (see below)
 ``b``                        jump back half a second (x speed)
+left / right                 step one frame (10 with shift); pauses playback
 click                        move the selected pixel
 **ctrl+click**               add another pixel (each gets its own color)
 ``c``                        clear all but the last pixel
@@ -59,6 +60,7 @@ from widefield.gui._common import (
     require_qt,
     run_app,
     text_entry_focused,
+    window_title,
 )
 from widefield.svd import flatten_u
 
@@ -185,6 +187,7 @@ def _build():
             nsv_display=None,
             cax=(-0.4, 0.4),
             use_opengl=False,
+            session=None,
             parent=None,
         ):
             super().__init__(parent)
@@ -241,7 +244,7 @@ def _build():
             self._recording = False
             self._use_opengl = bool(use_opengl)
 
-            self.setWindowTitle("Movie with traces (SVD)")
+            self.setWindowTitle(window_title("Movie with traces (SVD)", session))
             self._build_ui(pg, QtWidgets)
             self._recompute_pixel_traces()
 
@@ -269,7 +272,15 @@ def _build():
             controls.addWidget(self._slider, stretch=1)
 
             self._readout = QtWidgets.QLabel()
-            self._readout.setMinimumWidth(260)
+            # Monospace and fixed-width fields: the readout updates every frame, and
+            # with a proportional font a change in one field (frame number growing a
+            # digit, "17 fps" appearing) shifted all the others sideways and made the
+            # whole row unreadable while playing.
+            mono = QtGui.QFont("Consolas")
+            mono.setStyleHint(QtGui.QFont.Monospace)
+            mono.setPointSize(9)
+            self._readout.setFont(mono)
+            self._readout.setMinimumWidth(560)
             controls.addWidget(self._readout)
 
             # Follow: keep the trace window centerd on the current frame. Any manual zoom or pan
@@ -392,7 +403,8 @@ def _build():
                 self._aux_items.append(item)
 
             hint = QtWidgets.QLabel(
-                "p: play · up/down: rate · b: back · click: move pixel · "
+                "p: play · up/down: speed · left/right: step frame · b: back · "
+                "click: move pixel · "
                 "ctrl+click: add pixel · c: clear · -/=: color scale · alt+arrows: rotate/flip"
                 " · g: fast GPU view" + ("  · r: record" if self._movie_save_path else "")
             )
@@ -617,6 +629,15 @@ def _build():
                 self.set_speed(self._speed * 2)
             elif key == QtCore.Qt.Key_Down:
                 self.set_speed(self._speed / 2)
+            elif key in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right):
+                # Step frames. Stepping implies you want to look at something, so it
+                # pauses rather than fighting playback for the next tick.
+                step = 10 if mods & QtCore.Qt.ShiftModifier else 1
+                if key == QtCore.Qt.Key_Left:
+                    step = -step
+                if self._playing:
+                    self._play_btn.setChecked(False)
+                self.set_frame(self._frame + step)
             elif key == QtCore.Qt.Key_B:
                 back = max(1, int(round(_JUMP_BACK_SECONDS * self._fs * self._speed)))
                 self.set_frame(self._frame - back)
@@ -861,18 +882,21 @@ def _build():
                 self._slider.setValue(self._frame)
                 self._slider.blockSignals(blocked)
 
-            bits = [
-                f"frame {self._frame + 1}/{self._n_frames}",
-                f"t = {now:.3f} s",
-                f"speed {self._speed:g}x",
-                f"scale +/-{self._cax[1]:.3g}",
-                f"{len(self._pixels)} px",
-            ]
+            # Every field is padded to a constant width so nothing shifts as values
+            # change; the fps slot shows dashes rather than vanishing when unmeasured.
+            width = len(str(self._n_frames))
             achieved = self._achieved_fps()
-            if achieved is not None:
-                # Surfaced so slow rendering is visible rather than mysterious: if this sits
-                # well below fs * speed, frames are being dropped to hold the speed.
-                bits.append(f"{achieved:.0f} fps drawn")
+            fps_text = f"{achieved:4.0f}" if achieved is not None else "  --"
+            bits = [
+                f"frame {self._frame + 1:>{width}}/{self._n_frames}",
+                f"t {now:9.3f} s",
+                f"speed {self._speed:>6g}x",
+                f"scale +/-{self._cax[1]:<8.3g}",
+                f"{len(self._pixels):>3} px",
+                # Surfaced so slow rendering is visible rather than mysterious: if this
+                # sits well below fs * speed, frames are being dropped to hold speed.
+                f"{fps_text} fps drawn",
+            ]
             if self._recording:
                 bits.append("RECORDING")
             # Aux failures go last so the status line does not silently clobber them — a broken
@@ -945,6 +969,7 @@ def movie_with_traces(
     nsv_display: int | None = None,
     cax: tuple[float, float] = (-0.4, 0.4),
     use_opengl: bool = False,
+    session=None,
     block: bool = True,
 ):
     """Open the movie viewer. Equivalent to ``movieWithTracesSVD(U, V, t, traces, path[, auxVid])``.
@@ -973,6 +998,7 @@ def movie_with_traces(
         nsv_display=nsv_display,
         cax=cax,
         use_opengl=use_opengl,
+        session=session,
     )
     viewer.resize(1400, 780)
     viewer.show()

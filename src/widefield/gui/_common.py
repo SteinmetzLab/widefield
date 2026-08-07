@@ -13,7 +13,9 @@ is not.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -26,6 +28,7 @@ __all__ = [
     "clamp",
     "install_hotkeys",
     "make_bandpass_control",
+    "window_title",
     "text_entry_focused",
 ]
 
@@ -63,6 +66,40 @@ def polygon_mask(vertices: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
             x_at = ax + (py - ay) * (bx - ax) / (by - ay)
         inside ^= straddles & (px < x_at)
     return inside
+
+
+def session_label(session) -> str:
+    """A short "subject / date / exp" label for whatever identifies a session.
+
+    Accepts a plain string, a path to a session folder in the server layout
+    (``.../Subjects/<subject>/<date>/<exp>``), or any object exposing ``subject`` /
+    ``date`` / ``number`` attributes (a DataBrowser Session, for instance). Anything
+    unrecognised is just stringified, so callers can pass a label of their own.
+    """
+    if session is None:
+        return ""
+    if isinstance(session, str | Path):
+        path = Path(session)
+        parts = path.parts
+        # <subject>/<date>/<exp> at the end is the lab's layout; fall back to the text.
+        if len(parts) >= 3 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", parts[-2]):
+            return f"{parts[-3]} / {parts[-2]} / {parts[-1]}"
+        return str(session)
+    subject = getattr(session, "subject", None)
+    date = getattr(session, "date", None)
+    number = getattr(session, "number", getattr(session, "exp", None))
+    if subject is not None:
+        bits = [str(subject), str(date) if date is not None else "", ""]
+        if number is not None:
+            bits[2] = str(number)
+        return " / ".join(b for b in bits if b)
+    return str(session)
+
+
+def window_title(viewer_name: str, session=None) -> str:
+    """Window title: the viewer's name, plus which session it is showing."""
+    label = session_label(session)
+    return f"{viewer_name}  —  {label}" if label else viewer_name
 
 
 def clamp(value: int, low: int, high: int) -> int:

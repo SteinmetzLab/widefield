@@ -38,6 +38,7 @@ from widefield.gui._common import (
     require_qt,
     run_app,
     text_entry_focused,
+    window_title,
 )
 from widefield.svd import pixel_timecourse
 
@@ -54,7 +55,9 @@ def _build():
     class PixelCorrelationViewer(QtWidgets.QWidget):
         """Widget form, so this can be embedded (e.g. in DataBrowser) as well as run standalone."""
 
-        def __init__(self, u, v, t=None, max_components=None, hover=True, parent=None):
+        def __init__(
+            self, u, v, t=None, max_components=None, hover=True, session=None, parent=None
+        ):
             super().__init__(parent)
             self._u = np.asarray(u)
             self._v_raw = np.asarray(v)
@@ -76,7 +79,7 @@ def _build():
             # MATLAB defaults it off (its maps were slower); 'h' still toggles.
             self._hover = bool(hover)
 
-            self.setWindowTitle("Pixel correlation (SVD)")
+            self.setWindowTitle(window_title("Pixel correlation (SVD)", session))
             self._build_ui(pg, QtWidgets)
             self._rebuild_correlation()
             self._refresh(full=True)
@@ -366,6 +369,7 @@ def pixel_correlation_viewer(
     t: np.ndarray | None = None,
     max_components: int | None = None,
     hover: bool = True,
+    session=None,
     block: bool = True,
 ):
     """Open the seed-pixel correlation viewer. Equivalent to ``pixelCorrelationViewerSVD(U, V)``.
@@ -385,7 +389,7 @@ def pixel_correlation_viewer(
     The viewer widget, so callers can keep a reference or inspect it.
     """
     app = ensure_app()
-    viewer = _get_class()(u, v, t=t, max_components=max_components, hover=hover)
+    viewer = _get_class()(u, v, t=t, max_components=max_components, hover=hover, session=session)
     viewer.resize(760, 820)
     viewer.show()
     viewer.setFocus()

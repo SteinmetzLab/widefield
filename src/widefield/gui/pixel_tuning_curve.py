@@ -48,6 +48,7 @@ from widefield.gui._common import (
     require_qt,
     run_app,
     text_entry_focused,
+    window_title,
 )
 from widefield.svd import flatten_u
 
@@ -97,6 +98,7 @@ def _build():
             event_labels,
             calc_win,
             upsample=4,
+            session=None,
             parent=None,
         ):
             super().__init__(parent)
@@ -153,7 +155,7 @@ def _build():
             self.roi: dict | None = None
             self._sem: np.ndarray | None = None  # (nCond, nWindow) s.e.m. across events
 
-            self.setWindowTitle("Pixel tuning curve (SVD)")
+            self.setWindowTitle(window_title("Pixel tuning curve (SVD)", session))
             self._colors = condition_colors(self._n_cond)
             self._build_ui(pg, QtWidgets)
 
@@ -205,10 +207,16 @@ def _build():
             # needs two curves, so each band keeps its own (hidden) upper/lower pair.
             self._sem_bands = []
             for c in self._colors:
-                lo = self._trace_plot.plot(pen=None)
-                hi = self._trace_plot.plot(pen=None)
+                # A *transparent* pen, not pen=None: with no pen pyqtgraph never builds the
+                # PlotDataItem's internal curve path, so FillBetweenItem.updatePath finds no
+                # polygons and silently fills nothing. This is why the bands were invisible.
+                invisible = pg.mkPen((0, 0, 0, 0))
+                lo = self._trace_plot.plot(pen=invisible)
+                hi = self._trace_plot.plot(pen=invisible)
                 rgb = tuple((c * 255).astype(int))
-                band = pg.FillBetweenItem(lo, hi, brush=pg.mkBrush((*rgb, 70)))
+                # 50% alpha in the trace's own color: dark enough to read the mean line
+                # through, bright enough to see against the dark background.
+                band = pg.FillBetweenItem(lo, hi, brush=pg.mkBrush((*rgb, 128)))
                 band.setZValue(-10)  # behind the mean lines
                 self._trace_plot.addItem(band)
                 self._sem_bands.append((band, lo, hi))
@@ -225,22 +233,16 @@ def _build():
             self._tc_plot.setLabel("bottom", "Condition")
             self._tc_plot.setLabel("left", "Activity")
             self._tc_plot.showGrid(x=True, y=True, alpha=0.2)
-            self._tc_curve = self._tc_plot.plot(
-                pen=pg.mkPen("w", width=1), symbol="o", symbolSize=6, symbolBrush="w"
-            )
+            # The connecting line stays neutral; the points carry the condition colors so the
+            # right panel reads against the middle one at a glance.
+            self._tc_curve = self._tc_plot.plot(pen=pg.mkPen((150, 150, 150), width=1))
+            self._tc_points = pg.ScatterPlotItem(pxMode=True)
+            self._tc_points.setZValue(15)
+            self._tc_plot.addItem(self._tc_points)
             # Vertical mean +/- s.e.m. bars on each condition, unconnected.
             self._tc_errors = pg.ErrorBarItem(pen=pg.mkPen((200, 200, 200), width=1), beam=0.0)
             self._tc_plot.addItem(self._tc_errors)
-            # Bright green so the selected condition stands out against the dark background
-            # (a black star was invisible).
-            self._tc_marker = pg.ScatterPlotItem(
-                size=16,
-                symbol="star",
-                pen=pg.mkPen((0, 255, 0), width=2),
-                brush=pg.mkBrush((0, 255, 0)),
-            )
-            self._tc_marker.setZValue(20)
-            self._tc_plot.addItem(self._tc_marker)
+
             if not self._numeric_labels:
                 axis = self._tc_plot.getAxis("bottom")
                 ticks = zip(self._cond_x, self._conditions, strict=True)
@@ -546,6 +548,25 @@ def _build():
 
             tc = self._traces[:, self._time_idx]
             self._tc_curve.setData(self._cond_x, tc)
+            # Each point in its condition's color; the selected one becomes a larger star.
+            self._tc_points.setData(
+                x=self._cond_x,
+                y=tc,
+                symbol=["star" if c == self._cond_idx else "o" for c in range(self._n_cond)],
+                size=[18 if c == self._cond_idx else 8 for c in range(self._n_cond)],
+                brush=[
+                    pg.mkBrush(tuple((self._colors[c] * 255).astype(int)))
+                    for c in range(self._n_cond)
+                ],
+                pen=[
+                    (
+                        pg.mkPen("w", width=2)
+                        if c == self._cond_idx
+                        else pg.mkPen(tuple((self._colors[c] * 255).astype(int)))
+                    )
+                    for c in range(self._n_cond)
+                ],
+            )
             if self._sem is not None:
                 self._tc_errors.setData(
                     x=self._cond_x,
@@ -554,7 +575,6 @@ def _build():
                     bottom=self._sem[:, self._time_idx],
                 )
                 self._tc_errors.setVisible(self._sem_mode != _SEM_NONE)
-            self._tc_marker.setData([self._cond_x[self._cond_idx]], [tc[self._cond_idx]])
             self._tc_plot.setYRange(*self._cax, padding=0)
             if self._n_cond > 1:
                 mid = (self._cond_x[-1] + self._cond_x[0]) / 2.0
@@ -656,6 +676,7 @@ def pixel_tuning_curve_viewer(
     event_labels: np.ndarray,
     calc_win: tuple[float, float] = (-0.5, 1.5),
     upsample: int = 4,
+    session=None,
     block: bool = True,
 ):
     """Open the tuning viewer. Equivalent to ``pixelTuningCurveViewerSVD(U,V,t,times,labels,win)``.
@@ -674,7 +695,9 @@ def pixel_tuning_curve_viewer(
         dense grid before averaging recovers sub-frame detail. 1 reproduces the MATLAB.
     """
     app = ensure_app()
-    viewer = _get_class()(u, v, t, event_times, event_labels, calc_win, upsample=upsample)
+    viewer = _get_class()(
+        u, v, t, event_times, event_labels, calc_win, upsample=upsample, session=session
+    )
     viewer.resize(1500, 620)
     viewer.show()
     viewer.setFocus()

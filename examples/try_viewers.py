@@ -330,20 +330,22 @@ def main() -> int:
 
     if "svd" in wanted:
         log.info("building SVD component browser ...")
-        w_svd = svd_class()(u, sv, v, fs=fs, total_variance=total_var)
-        w_svd.setWindowTitle("1. SVD viewer  —  svdViewer")
+        w_svd = svd_class()(u, sv, v, fs=fs, total_variance=total_var, session=session)
+        w_svd.setWindowTitle("1. " + w_svd.windowTitle())
         windows.append(w_svd)
 
     if "corr" in wanted:
         log.info("building correlation viewer (precomputing covariance) ...")
-        w_corr = corr_class()(u, v, t=t)
-        w_corr.setWindowTitle("2. Pixel correlation  —  pixelCorrelationViewerSVD")
+        w_corr = corr_class()(u, v, t=t, session=session)
+        w_corr.setWindowTitle("2. " + w_corr.windowTitle())
         windows.append(w_corr)
 
     if "tuning" in wanted:
         log.info("building tuning viewer (event-locked average) ...")
-        w_tun = tuning_class()(u, v, t, event_times, event_labels, tuple(args.calc_win))
-        w_tun.setWindowTitle(f"3. Pixel tuning  —  pixelTuningCurveViewerSVD  [{event_source}]")
+        w_tun = tuning_class()(
+            u, v, t, event_times, event_labels, tuple(args.calc_win), session=session
+        )
+        w_tun.setWindowTitle(f"3. {w_tun.windowTitle()}  [{event_source}]")
         windows.append(w_tun)
 
     if "movie" in wanted:
@@ -364,8 +366,9 @@ def main() -> int:
             t=t_disp,
             traces=traces,
             use_opengl=not args.no_opengl,
+            session=session,
         )
-        w_movie.setWindowTitle("4. Movie with traces  —  movieWithTracesSVD")
+        w_movie.setWindowTitle("4. " + w_movie.windowTitle())
         windows.append(w_movie)
 
     tile(windows, app)

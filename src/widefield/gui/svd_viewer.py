@@ -34,6 +34,7 @@ from widefield.gui._common import (
     require_qt,
     run_app,
     text_entry_focused,
+    window_title,
 )
 
 __all__ = ["svd_viewer"]
@@ -43,7 +44,7 @@ def _build():
     pg, QtCore, _QtGui, QtWidgets = require_qt()
 
     class SVDViewer(QtWidgets.QWidget):
-        def __init__(self, u, sv, v, fs=1.0, total_variance=None, parent=None):
+        def __init__(self, u, sv, v, fs=1.0, total_variance=None, session=None, parent=None):
             super().__init__(parent)
             self._u = np.asarray(u)
             self._sv = np.asarray(sv, dtype=float).ravel()
@@ -65,7 +66,7 @@ def _build():
             self._cax_scale = 1.0
             self._time = np.arange(self._v.shape[1]) / self._fs
 
-            self.setWindowTitle("SVD viewer")
+            self.setWindowTitle(window_title("SVD viewer", session))
             self._build_ui(pg, QtWidgets)
             self._refresh(full=True)
 
@@ -286,6 +287,7 @@ def svd_viewer(
     v: np.ndarray,
     fs: float = 1.0,
     total_variance: float | None = None,
+    session=None,
     block: bool = True,
 ):
     """Open the component browser. Equivalent to ``svdViewer(U, Sv, V, Fs[, totalVariance])``.
@@ -295,7 +297,7 @@ def svd_viewer(
     "of the variance retained" rather than "of the movie".
     """
     app = ensure_app()
-    viewer = _get_class()(u, sv, v, fs=fs, total_variance=total_variance)
+    viewer = _get_class()(u, sv, v, fs=fs, total_variance=total_variance, session=session)
     viewer.resize(1200, 900)
     viewer.show()
     viewer.setFocus()
