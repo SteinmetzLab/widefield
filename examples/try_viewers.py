@@ -136,8 +136,48 @@ def stim_times_from_photodiode(session: Path, min_gap_s: float = 1.0, cap: int =
     return onsets
 
 
+def laser_events(session: Path):
+    """Laser onsets with power as the condition label. ``None`` unless this is an opto session.
+
+    This gives the tuning viewer *real* conditions: response versus laser power, which is an
+    actual tuning curve rather than a shape-check. Preferred over the photodiode route wherever
+    it is available.
+    """
+    on_p, pw_p = session / "laserOnTimes.npy", session / "laserPowers.npy"
+    if not (on_p.exists() and pw_p.exists()):
+        return None
+    try:
+        on = np.asarray(np.load(on_p)).ravel()
+        power = np.asarray(np.load(pw_p)).ravel()
+        n = min(on.size, power.size)
+        return on[:n], power[:n]
+    except Exception as exc:
+        log.warning("could not read laser events (%s)", exc)
+        return None
+
+
 def make_events(session: Path, t: np.ndarray, rng):
-    """Event times + condition labels for the tuning viewer, and a note on their provenance."""
+    """Event times + condition labels for the tuning viewer, and a note on their provenance.
+
+    Three sources in descending order of scientific meaning:
+      1. laser onsets labelled by power (opto sessions) - a genuine tuning curve;
+      2. photodiode onsets with cycled pseudo-labels - exercises the viewer, curve is meaningless;
+      3. invented random times - last resort.
+    """
+    if session is not None:
+        got = laser_events(session)
+        if got is not None:
+            onsets, labels = got
+            keep = (onsets > t[0] + 1.0) & (onsets < t[-1] - 2.0)
+            onsets, labels = onsets[keep], labels[keep]
+            if onsets.size >= 10:
+                n_levels = np.unique(labels).size
+                return (
+                    onsets,
+                    labels,
+                    f"laser onsets ({onsets.size}), {n_levels} real power levels",
+                )
+
     onsets = stim_times_from_photodiode(session) if session is not None else None
     if onsets is not None:
         onsets = onsets[(onsets > t[0] + 1.0) & (onsets < t[-1] - 2.0)]
@@ -146,10 +186,10 @@ def make_events(session: Path, t: np.ndarray, rng):
         source = "invented (random) times"
     else:
         source = f"photodiode onsets ({onsets.size})"
-    # This session has no trials ALF, so there are no real condition labels. Cycling through
-    # four pseudo-conditions exercises the viewer; the tuning curve is meaningless by design.
+    # No trials ALF here, so there are no real condition labels. Cycling through four
+    # pseudo-conditions exercises the viewer; the tuning curve is meaningless by design.
     labels = np.arange(onsets.size) % N_CONDITIONS / (N_CONDITIONS - 1.0)
-    return onsets, labels, source + ", pseudo-conditions"
+    return onsets, labels, source + ", PSEUDO-conditions"
 
 
 def demo_data():
