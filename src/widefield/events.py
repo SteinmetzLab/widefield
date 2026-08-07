@@ -37,18 +37,33 @@ def matlab_range(start: float, step: float, stop: float) -> np.ndarray:
     return start + np.arange(n, dtype=float) * step
 
 
-def peri_event_window(t: np.ndarray, calc_win: tuple[float, float], fs: float | None = None):
-    """Time offsets sampled inside ``calc_win``, at the data's own frame rate.
+def peri_event_window(
+    t: np.ndarray,
+    calc_win: tuple[float, float],
+    fs: float | None = None,
+    upsample: int = 1,
+):
+    """Time offsets sampled inside ``calc_win``. Returns ``(win_samps, fs)``.
 
-    Returns ``(win_samps, fs)``. ``fs`` is derived from the *median* inter-frame interval
-    (not the mean), so a session with a few dropped frames still reports its true rate.
+    ``fs`` is derived from the *median* inter-frame interval (not the mean), so a session
+    with a few dropped frames still reports its true rate.
+
+    ``upsample`` makes the grid that many times denser than the frame rate, and it is worth
+    doing *before* averaging. Events almost never land at the same offset within a frame, so
+    each event samples the underlying response at a different sub-frame phase; interpolating
+    every event onto a dense grid and only then averaging recovers detail finer than one
+    frame. The MATLAB interpolates too, but only ever onto a 1/fs grid, so it gets that
+    benefit at the grid points and no finer.
     """
     t = np.asarray(t, dtype=float).ravel()
     if fs is None:
         if t.size < 2:
             raise ValueError("need at least 2 timestamps to infer the frame rate")
         fs = 1.0 / float(np.median(np.diff(t)))
-    return matlab_range(calc_win[0], 1.0 / fs, calc_win[1]), fs
+    upsample = int(upsample)
+    if upsample < 1:
+        raise ValueError(f"upsample must be >= 1, got {upsample}")
+    return matlab_range(calc_win[0], 1.0 / (fs * upsample), calc_win[1]), fs
 
 
 class EventLockedAvg(NamedTuple):
@@ -68,6 +83,8 @@ def event_locked_avg_svd(
     event_labels: np.ndarray,
     calc_win: tuple[float, float],
     fs: float | None = None,
+    upsample: int = 1,
+    keep_peri: bool = True,
 ) -> EventLockedAvg:
     """Average temporal components around each event, grouped by condition.
 
@@ -79,6 +96,12 @@ def event_locked_avg_svd(
     event_labels : (nEvents,) condition of each event. Numeric labels are used directly as
         tuning-curve x-values; string labels are treated as categorical.
     calc_win : (start, stop) seconds relative to the event.
+    upsample : sample the window this many times more finely than the frame rate, exploiting
+        the sub-frame jitter of event times (see :func:`peri_event_window`).
+    keep_peri : hold every event's windowed components in ``peri_v``. Set False to average
+        condition by condition instead: ``peri_v`` comes back empty, but the peak allocation
+        drops from nSV x nEvents x nWindow to one condition's worth. On a 2220-event opto
+        session at upsample=4 that is ~550 MB versus ~25 MB.
 
     Notes
     -----
@@ -103,33 +126,40 @@ def event_locked_avg_svd(
     event_times = event_times[order]
     sorted_labels = event_labels[order]
 
-    win_samps, _ = peri_event_window(t, calc_win, fs)
+    win_samps, _ = peri_event_window(t, calc_win, fs, upsample)
     n_sv, n_ev, n_win = v.shape[0], event_times.size, win_samps.size
-
-    # (nEvents, nWindow) absolute sample times, then one interp per component.
-    peri_times = event_times[:, None] + win_samps[None, :]
-    flat_times = peri_times.ravel()
-    peri_v = np.empty((n_sv, n_ev, n_win), dtype=float)
-    for s in range(n_sv):
-        peri_v[s] = np.interp(
-            flat_times, t, np.asarray(v[s], dtype=float), left=np.nan, right=np.nan
-        ).reshape(n_ev, n_win)
-
     conditions = np.unique(sorted_labels)
+
+    def windowed(component: int, times: np.ndarray) -> np.ndarray:
+        """One component interpolated onto every given event window -> (nEvents, nWindow)."""
+        flat = (times[:, None] + win_samps[None, :]).ravel()
+        return np.interp(
+            flat, t, np.asarray(v[component], dtype=float), left=np.nan, right=np.nan
+        ).reshape(times.size, n_win)
+
     avg_v = np.empty((conditions.size, n_sv, n_win), dtype=float)
-    for c, label in enumerate(conditions):
-        mask = sorted_labels == label
-        block = peri_v[:, mask, :]
-        # An event window wholly outside the recording makes a column all-NaN; that is a
-        # legitimate "no data here", so silence the mean-of-empty-slice warning rather than
-        # letting it surface as a scary numerical error.
-        with np.errstate(invalid="ignore"):
-            avg_v[c] = _nanmean_quiet(block, axis=1)
+
+    # An event window wholly outside the recording makes a column all-NaN; that is a
+    # legitimate "no data here", so the nanmean helper silences the empty-slice warning
+    # rather than letting it surface as a scary numerical error.
+    if keep_peri:
+        peri_v = np.empty((n_sv, n_ev, n_win), dtype=float)
+        for comp in range(n_sv):
+            peri_v[comp] = windowed(comp, event_times)
+        for c, label in enumerate(conditions):
+            avg_v[c] = _nanmean_quiet(peri_v[:, sorted_labels == label, :], axis=1)
+        peri_out = np.transpose(peri_v, (1, 0, 2))
+    else:
+        for c, label in enumerate(conditions):
+            times_c = event_times[sorted_labels == label]
+            for comp in range(n_sv):
+                avg_v[c, comp] = _nanmean_quiet(windowed(comp, times_c), axis=0)
+        peri_out = np.empty((0, n_sv, n_win), dtype=float)
 
     return EventLockedAvg(
         avg_v=avg_v,
         win_samps=win_samps,
-        peri_v=np.transpose(peri_v, (1, 0, 2)),
+        peri_v=peri_out,
         sorted_labels=sorted_labels,
         conditions=conditions,
     )
@@ -150,6 +180,7 @@ def peri_event_series(
     event_times: np.ndarray,
     calc_win: tuple[float, float],
     fs: float | None = None,
+    upsample: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Peri-event matrix of a single 1-D trace → ``(peri, win_samps)``, ``peri`` (nEvents, nWindow).
 
@@ -159,7 +190,7 @@ def peri_event_series(
     t = np.asarray(t, dtype=float).ravel()
     series = np.asarray(series, dtype=float).ravel()
     event_times = np.asarray(event_times, dtype=float).ravel()
-    win_samps, _ = peri_event_window(t, calc_win, fs)
+    win_samps, _ = peri_event_window(t, calc_win, fs, upsample)
     peri_times = (event_times[:, None] + win_samps[None, :]).ravel()
     peri = np.interp(peri_times, t, series, left=np.nan, right=np.nan)
     return peri.reshape(event_times.size, win_samps.size), win_samps

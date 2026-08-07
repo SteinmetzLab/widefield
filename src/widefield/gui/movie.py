@@ -75,6 +75,11 @@ _JUMP_BACK_SECONDS = 0.5  # MATLAB's 'b' jumped 20 frames; express it as time in
 # Frames reconstructed per batch during playback. At 512x512x2000 a block costs
 # nPix * block * 4 bytes (~33 MB at 32 frames) and turns a GEMV into a GEMM.
 _PREFETCH_BLOCK = 32
+# The trace panels are redrawn at most this often while playing. Their repaint costs about
+# as much as the movie's (a large pyqtgraph scene is a large CPU blit), and a scrolling
+# 10 s window conveys nothing extra above ~12 Hz -- so decoupling them roughly doubles the
+# movie's frame rate. Paused, they always update.
+_TRACE_HZ = 12.0
 
 # MATLAB's default axes ColorOrder, so multi-pixel colors match a MATLAB figure.
 _PIXEL_COLORS = np.array(
@@ -128,6 +133,19 @@ class AuxVideo:
     data: object = None
     name: str = ""
     extra: dict = field(default_factory=dict)
+
+
+def _thin(curve) -> None:
+    """Let pyqtgraph draw a curve at screen resolution instead of point-by-point.
+
+    A 10 s window of a 2 kHz Timeline channel is ~2000 points drawn into ~1000 px, and
+    stroking that vector path dominated the frame time: on a 2540x1360 window the trace
+    panels cost ~60 ms/frame, more than the movie itself. Peak-mode downsampling keeps the
+    visible extremes (so brief spikes still show) while cutting the point count to what the
+    panel can actually resolve; clipToView drops everything outside the visible x-range.
+    """
+    curve.setDownsampling(auto=True, method="peak")
+    curve.setClipToView(True)
 
 
 def _as_traces(traces) -> list[Trace]:
@@ -201,6 +219,7 @@ def _build():
             self._v32 = np.asfortranarray(self._v[:nsv], dtype=np.float32)
             self._block_start = -1
             self._block: np.ndarray | None = None
+            self._last_trace_draw = 0.0
             self._fs = float(1.0 / np.median(np.diff(self._t))) if self._t.size > 1 else 1.0
 
             self._traces = _as_traces(traces)
@@ -264,6 +283,15 @@ def _build():
             self._follow_chk.toggled.connect(self._on_follow_toggled)
             controls.addWidget(self._follow_chk)
 
+            self._fast_chk = QtWidgets.QCheckBox("Fast (GPU)")
+            self._fast_chk.setToolTip(
+                "Draw the movie as a GPU texture instead of through pyqtgraph.\n"
+                "Much faster on a large window (~60 fps vs ~14), but no pan/zoom,\n"
+                "colorbar or axes while it is on. Toggle with g."
+            )
+            self._fast_chk.toggled.connect(self._on_fast_toggled)
+            controls.addWidget(self._fast_chk)
+
             if self._movie_save_path is not None:
                 self._rec_btn = QtWidgets.QPushButton("record")
                 self._rec_btn.setCheckable(True)
@@ -275,19 +303,25 @@ def _build():
             self.bandpass = make_bandpass_control(self._v_raw, self._fs, self._on_filtered)
             root.addWidget(self.bandpass)
 
-            self._glw = pg.GraphicsLayoutWidget()
+            body = QtWidgets.QHBoxLayout()
+            root.addLayout(body, stretch=1)
+
+            # --- image area: a stack of the normal pyqtgraph view and a GPU-texture view ---
+            self._img_stack = QtWidgets.QStackedWidget()
+            body.addWidget(self._img_stack, stretch=3)
+
+            self._img_glw = pg.GraphicsLayoutWidget()
             if self._use_opengl:
-                # Measured ~33% faster on a 2540x1360 window (82 -> 61 ms/frame): the cost is
-                # blitting the upscaled image, which the GPU does better. Optional because it
-                # needs working OpenGL drivers, and pyqtgraph's path for it is less exercised.
+                # Note this is NOT a texture path: pyqtgraph's useOpenGL only retargets QPainter
+                # at a GL-backed surface, so every item is still rasterized on the CPU. Measured
+                # ~20% (88 -> 72 ms/frame) on a 2540x1360 window. The real fix is the fast view.
                 try:
-                    self._glw.useOpenGL(True)
+                    self._img_glw.useOpenGL(True)
                 except Exception:  # pragma: no cover - depends on the machine
                     log.debug("OpenGL unavailable; using the raster path", exc_info=True)
-            root.addWidget(self._glw, stretch=1)
+            self._img_stack.addWidget(self._img_glw)
 
-            # Column 0: the movie. Columns 1..: stacked traces, then any aux videos.
-            self._plot = self._glw.addPlot(row=0, col=0, rowspan=max(1, len(self._traces) + 1))
+            self._plot = self._img_glw.addPlot(row=0, col=0)
             self._plot.setAspectLocked(True)
             self._plot.invertY(True)
             self._plot.hideAxis("bottom")
@@ -303,18 +337,34 @@ def _build():
             )
             self._colorbar.setImageItem(self._image, insert_in=self._plot)
 
+            self._fast_view = self._make_fast_view(pg, QtCore, QtWidgets)
+            self._img_stack.addWidget(self._fast_view if self._fast_view else QtWidgets.QWidget())
+
+            self._glw = pg.GraphicsLayoutWidget()
+            if self._use_opengl:
+                # Worth as much here as on the image: the trace panels are their own large
+                # scene, and on a 2540x1360 window moving them to GL took playback from
+                # 9.9 to 16.3 fps.
+                try:
+                    self._glw.useOpenGL(True)
+                except Exception:  # pragma: no cover - depends on the machine
+                    log.debug("OpenGL unavailable for the trace panels", exc_info=True)
+            body.addWidget(self._glw, stretch=2)
+
             n_rows = len(self._traces) + 1
             self._trace_plots = []
             self._trace_curves = []
             self._trace_marks = []
             for i in range(n_rows):
-                p = self._glw.addPlot(row=i, col=1)
+                p = self._glw.addPlot(row=i, col=0)
                 p.showGrid(x=True, y=True, alpha=0.15)
                 p.getAxis("left").setWidth(50)
                 if i < n_rows - 1:
                     p.hideAxis("bottom")
                     p.setTitle(self._traces[i].name or None, size="9pt")
-                    self._trace_curves.append([p.plot(pen=pg.mkPen("w", width=1))])
+                    curve = p.plot(pen=pg.mkPen("w", width=1))
+                    _thin(curve)
+                    self._trace_curves.append([curve])
                 else:
                     p.setLabel("bottom", "Time (s)")
                     p.setTitle("Selected pixels", size="9pt")
@@ -331,7 +381,7 @@ def _build():
 
             self._aux_items = []
             for j, aux in enumerate(self._aux):
-                p = self._glw.addPlot(row=0, col=2 + j, rowspan=n_rows)
+                p = self._glw.addPlot(row=0, col=1 + j, rowspan=n_rows)
                 p.setAspectLocked(True)
                 p.invertY(True)
                 p.hideAxis("bottom")
@@ -341,22 +391,125 @@ def _build():
                 p.addItem(item)
                 self._aux_items.append(item)
 
-            self._glw.ci.layout.setColumnStretchFactor(0, 3)
-            self._glw.ci.layout.setColumnStretchFactor(1, 2)
-
             hint = QtWidgets.QLabel(
                 "p: play · up/down: rate · b: back · click: move pixel · "
                 "ctrl+click: add pixel · c: clear · -/=: color scale · alt+arrows: rotate/flip"
-                + ("  · r: record" if self._movie_save_path else "")
+                " · g: fast GPU view" + ("  · r: record" if self._movie_save_path else "")
             )
             hint.setStyleSheet("color: gray;")
             hint.setWordWrap(True)
             root.addWidget(hint)
 
             self._image.scene().sigMouseClicked.connect(self._on_click)
+            if self._fast_view is not None:
+                self._fast_image.mousePressEvent = self._fast_mouse_press
             self.setFocusPolicy(QtCore.Qt.StrongFocus)
             # Route keys from anywhere in the window (image, buttons, slider) to _handle_key.
             install_hotkeys(self, self._handle_key)
+
+        # ---------------------------------------------------------------- fast (GPU) view
+
+        def _make_fast_view(self, pg, QtCore, QtWidgets):
+            """A GPU-texture image view, or None if pyqtgraph/OpenGL cannot provide one.
+
+            pyqtgraph's ImageItem does the colormap lookup *and* the upscale on the CPU; measured
+            on a 2540x1360 window that is 70 ms/frame against 34 ms for an empty view. A
+            RawImageGLWidget uploads the frame as a texture and lets the GPU sample it, which
+            measured 16.6 ms - i.e. vsync-locked 60 fps. That is the same trick MATLAB's renderer
+            uses when you replace CData.
+
+            The cost is that it is a bare image: no ViewBox, so no pan/zoom, no axes, no colorbar.
+            Markers are stamped into the pixels instead (see :meth:`_fast_rgba`).
+            """
+            try:
+                from pyqtgraph.widgets.RawImageWidget import RawImageGLWidget
+            except ImportError:  # pragma: no cover - depends on the install
+                log.debug("RawImageGLWidget unavailable", exc_info=True)
+                return None
+
+            try:
+                view = RawImageGLWidget(smooth=False)
+            except Exception:  # pragma: no cover - depends on drivers
+                log.debug("could not create a GL image widget", exc_info=True)
+                return None
+
+            # RawImageGLWidget blits the texture across its whole rect, so a square movie in a
+            # tall panel would be stretched. Keep it aspect-correct by sizing it ourselves.
+            class _AspectBox(QtWidgets.QWidget):
+                def __init__(self, child, aspect):
+                    super().__init__()
+                    self._child = child
+                    self._aspect = aspect
+                    child.setParent(self)
+
+                def resizeEvent(self, event):
+                    w, h = self.width(), self.height()
+                    cw, ch = (
+                        (int(h * self._aspect), h)
+                        if w / max(h, 1) > self._aspect
+                        else (
+                            w,
+                            int(w / self._aspect),
+                        )
+                    )
+                    self._child.setGeometry((w - cw) // 2, (h - ch) // 2, cw, ch)
+                    super().resizeEvent(event)
+
+            ypix, xpix = self.shape
+            box = _AspectBox(view, xpix / ypix)
+            box.setStyleSheet("background: black;")
+            self._fast_image = view
+            # 256 x 4 uint8 colormap, applied by us so we can stamp markers before upload.
+            table = to_pyqtgraph(blueblackred()).getLookupTable(nPts=256, alpha=True)
+            self._fast_lut = np.ascontiguousarray(table, dtype=np.uint8)
+            self._fast_idx = None
+            return box
+
+        def _on_fast_toggled(self, on: bool) -> None:
+            if on and self._fast_view is None:
+                self._fast_chk.setChecked(False)
+                self._readout.setText("GPU view unavailable (needs OpenGL)")
+                return
+            self._img_stack.setCurrentIndex(1 if on else 0)
+            self._refresh()
+
+        @property
+        def fast_mode(self) -> bool:
+            return bool(self._fast_chk.isChecked())
+
+        def _fast_rgba(self, oriented: np.ndarray) -> np.ndarray:
+            """Colormap the frame ourselves and stamp the pixel markers into it.
+
+            Doing the lookup here rather than handing float32 + levels to the widget costs the
+            same (~4 ms) but lets the markers survive, which the GL view could not otherwise
+            overlay.
+            """
+            lo, hi = self._cax
+            scale = 255.0 / (hi - lo) if hi > lo else 0.0
+            if self._fast_idx is None or self._fast_idx.shape != oriented.shape:
+                self._fast_idx = np.empty(oriented.shape, dtype=np.uint8)
+            tmp = (oriented - lo) * scale
+            np.clip(tmp, 0, 255, out=tmp)
+            np.copyto(self._fast_idx, tmp, casting="unsafe")
+            rgba = self._fast_lut[self._fast_idx]
+
+            # Bounds come from the buffer itself, not from self.shape: they normally agree, but
+            # clipping against the array we are actually writing to cannot go out of range.
+            dh, dw = rgba.shape[0], rgba.shape[1]
+            for i, (y, x) in enumerate(self._pixels):
+                dy, dx = self._orient.to_display(y, x, self.shape)
+                if not (0 <= dy < dh and 0 <= dx < dw):
+                    continue
+                color = np.append((_PIXEL_COLORS[i % _N_CYCLE] * 255).astype(np.uint8), 255)
+                for oy in range(-4, 5):  # a small cross, clipped at the edges
+                    yy = dy + oy
+                    if 0 <= yy < dh:
+                        rgba[yy, dx] = color
+                for ox in range(-4, 5):
+                    xx = dx + ox
+                    if 0 <= xx < dw:
+                        rgba[dy, xx] = color
+            return rgba
 
         # ---------------------------------------------------------------- computation
 
@@ -393,6 +546,26 @@ def _build():
             ]
 
         # ---------------------------------------------------------------- interaction
+
+        def _fast_mouse_press(self, event):
+            """Map a click on the GL view to a data pixel (it fills its widget exactly)."""
+            w, h = self._fast_image.width(), self._fast_image.height()
+            if w <= 0 or h <= 0:
+                return
+            dh, dw = self._orient.display_shape(self.shape)
+            dx = int(event.position().x() / w * dw)
+            dy = int(event.position().y() / h * dh)
+            if not (0 <= dy < dh and 0 <= dx < dw):
+                return
+            pixel = self._orient.to_data(dy, dx, self.shape)
+            if event.modifiers() & QtCore.Qt.ControlModifier:
+                self._pixels.append(pixel)
+            elif event.button() == QtCore.Qt.LeftButton:
+                self._pixels[-1] = pixel
+            else:
+                return
+            self._recompute_pixel_traces()
+            self._refresh()
 
         def _on_click(self, event):
             pt = self._plot.vb.mapSceneToView(event.scenePos())
@@ -458,6 +631,8 @@ def _build():
                 self._scale_cax(0.75)
             elif key in (QtCore.Qt.Key_Equal, QtCore.Qt.Key_Plus):
                 self._scale_cax(1.25)
+            elif key == QtCore.Qt.Key_G:
+                self._fast_chk.setChecked(not self._fast_chk.isChecked())
             elif key == QtCore.Qt.Key_R and self._movie_save_path is not None:
                 self._rec_btn.setChecked(not self._rec_btn.isChecked())
             else:
@@ -613,22 +788,27 @@ def _build():
                 plot.removeItem(curves.pop())
             while len(curves) < len(self._pixels):
                 color = _PIXEL_COLORS[len(curves) % _N_CYCLE]
-                curves.append(plot.plot(pen=pg.mkPen(tuple((color * 255).astype(int)), width=2)))
+                curve = plot.plot(pen=pg.mkPen(tuple((color * 255).astype(int)), width=2))
+                _thin(curve)
+                curves.append(curve)
 
         def _refresh(self, full: bool = False) -> None:
-            self._image.setImage(
-                self._orient.apply(self._frame_image()), autoLevels=False, levels=self._cax
-            )
-            self._colorbar.setLevels(tuple(self._cax))
+            oriented = self._orient.apply(self._frame_image())
+            if self.fast_mode and self._fast_view is not None:
+                self._fast_image.setImage(self._fast_rgba(oriented))
+            else:
+                self._image.setImage(oriented, autoLevels=False, levels=self._cax)
+                self._colorbar.setLevels(tuple(self._cax))
 
-            display = [self._orient.to_display(y, x, self.shape) for y, x in self._pixels]
-            brushes = [
-                pg.mkBrush(tuple((_PIXEL_COLORS[i % _N_CYCLE] * 255).astype(int)))
-                for i in range(len(self._pixels))
-            ]
-            self._markers.setData(
-                [d[1] + 0.5 for d in display], [d[0] + 0.5 for d in display], brush=brushes
-            )
+            if not self.fast_mode:
+                display = [self._orient.to_display(y, x, self.shape) for y, x in self._pixels]
+                brushes = [
+                    pg.mkBrush(tuple((_PIXEL_COLORS[i % _N_CYCLE] * 255).astype(int)))
+                    for i in range(len(self._pixels))
+                ]
+                self._markers.setData(
+                    [d[1] + 0.5 for d in display], [d[0] + 0.5 for d in display], brush=brushes
+                )
 
             now = float(self._t[self._frame])
             half = _WINDOW_SECONDS / 2.0
@@ -639,27 +819,35 @@ def _build():
             # panning around does not run off the end of the data.
             follow = self._follow_chk.isChecked()
 
-            for i, trace in enumerate(self._traces):
+            # Redrawing the trace panels costs about as much as the movie itself, and they do
+            # not need the movie's frame rate. Skip them on most ticks while playing.
+            now_wall = time.perf_counter()
+            draw_traces = not self._playing or (now_wall - self._last_trace_draw) >= 1.0 / _TRACE_HZ
+            if draw_traces:
+                self._last_trace_draw = now_wall
+
+            if draw_traces:
+                for i, trace in enumerate(self._traces):
+                    if follow:
+                        sel = slice(*np.searchsorted(trace.t, [lo, hi]))
+                        if trace.lims is not None:
+                            self._trace_plots[i].setYRange(*trace.lims, padding=0)
+                    else:
+                        sel = slice(None)
+                    self._trace_curves[i][0].setData(trace.t[sel], trace.v[sel])
+
+                self._rebuild_pixel_curves()
+                sel = slice(*np.searchsorted(self._t, [lo, hi])) if follow else slice(None)
+                # strict: _rebuild_pixel_curves just synced the curves to self._pixels, and
+                # the traces came from the same list, so a mismatch is a real bug.
+                for curve, pt in zip(self._trace_curves[-1], self._pixel_traces, strict=True):
+                    curve.setData(self._t[sel], pt[sel])
+
                 if follow:
-                    sel = slice(*np.searchsorted(trace.t, [lo, hi]))
-                    if trace.lims is not None:
-                        self._trace_plots[i].setYRange(*trace.lims, padding=0)
-                else:
-                    sel = slice(None)
-                self._trace_curves[i][0].setData(trace.t[sel], trace.v[sel])
-
-            self._rebuild_pixel_curves()
-            sel = slice(*np.searchsorted(self._t, [lo, hi])) if follow else slice(None)
-            # strict: _rebuild_pixel_curves just synced the curves to self._pixels, and the
-            # traces were computed from the same list, so a length mismatch is a real bug.
-            for curve, pt in zip(self._trace_curves[-1], self._pixel_traces, strict=True):
-                curve.setData(self._t[sel], pt[sel])
-
-            if follow:
-                self._trace_plots[-1].setYRange(*self._cax, padding=0)
-                self._trace_plots[0].setXRange(lo, hi, padding=0)
-            for mark in self._trace_marks:
-                mark.setPos(now)  # the time cursor tracks the frame either way
+                    self._trace_plots[-1].setYRange(*self._cax, padding=0)
+                    self._trace_plots[0].setXRange(lo, hi, padding=0)
+                for mark in self._trace_marks:
+                    mark.setPos(now)  # the time cursor tracks the frame
 
             aux_errors = []
             for item, aux in zip(self._aux_items, self._aux, strict=True):
@@ -692,7 +880,7 @@ def _build():
             bits.extend(aux_errors)
             self._readout.setText("  |  ".join(bits))
 
-            if full:
+            if full and not self.fast_mode:
                 self._plot.vb.autoRange()
 
         # ---------------------------------------------------------------- programmatic API

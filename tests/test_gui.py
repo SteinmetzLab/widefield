@@ -216,11 +216,16 @@ def test_tuning_finds_four_conditions(tuning_viewer):
 
 
 def test_tuning_traces_match_the_numpy_layer(tuning_viewer, movie_data, event_data):
-    """Cross-check the middle panel against event_locked_avg_svd directly."""
+    """Cross-check the middle panel against event_locked_avg_svd at the viewer's own upsampling.
+
+    The viewer builds its traces from the *pixel's* peri-event matrix (so it can also report a
+    per-event s.e.m.), while avg_v averages in component space. Projection and averaging are both
+    linear, so the two must agree exactly — this is the test that keeps them honest.
+    """
     u, v, t = movie_data
     times, labels = event_data
     tuning_viewer.set_pixel(5, 4)
-    avg = event_locked_avg_svd(v, t, times, labels, (-0.3, 0.8))
+    avg = event_locked_avg_svd(v, t, times, labels, (-0.3, 0.8), upsample=tuning_viewer._upsample)
     expected = np.stack([u[5, 4, :] @ avg.avg_v[c] for c in range(avg.conditions.size)])
     np.testing.assert_allclose(tuning_viewer.traces, expected, rtol=1e-4, atol=1e-4)
 
@@ -322,21 +327,30 @@ def test_tuning_playback_honours_the_rate(tuning_viewer):
     assert tuning_viewer.time_index == 2
 
 
-def test_tuning_wheel_steps_time(tuning_viewer):
-    tuning_viewer._time_idx = 5
-    tuning_viewer.wheelEvent(
-        QtGui.QWheelEvent(
-            QtCore.QPointF(0, 0),
-            QtCore.QPointF(0, 0),
-            QtCore.QPoint(0, 0),
-            QtCore.QPoint(0, -120),
-            QtCore.Qt.NoButton,
-            QtCore.Qt.NoModifier,
-            QtCore.Qt.NoScrollPhase,
-            False,
-        )
+def _wheel(mods=QtCore.Qt.NoModifier):
+    return QtGui.QWheelEvent(
+        QtCore.QPointF(0, 0),
+        QtCore.QPointF(0, 0),
+        QtCore.QPoint(0, 0),
+        QtCore.QPoint(0, -120),
+        QtCore.Qt.NoButton,
+        mods,
+        QtCore.Qt.NoScrollPhase,
+        False,
     )
+
+
+def test_tuning_ctrl_wheel_steps_time(tuning_viewer):
+    tuning_viewer._time_idx = 5
+    tuning_viewer.wheelEvent(_wheel(QtCore.Qt.ControlModifier))
     assert tuning_viewer.time_index != 5
+
+
+def test_tuning_plain_wheel_is_left_to_pyqtgraph(tuning_viewer):
+    """A bare scroll should zoom the plots (pyqtgraph's own behavior), not step time."""
+    tuning_viewer._time_idx = 5
+    tuning_viewer.wheelEvent(_wheel())
+    assert tuning_viewer.time_index == 5
 
 
 def test_tuning_roi_gives_the_mean_over_its_pixels(tuning_viewer, movie_data):

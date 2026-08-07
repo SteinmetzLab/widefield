@@ -489,12 +489,26 @@ def test_time_cursor_still_tracks_the_frame_when_not_following(movie, movie_data
 
 
 def test_not_following_plots_the_whole_trace(movie, movie_data):
-    """Panning around should not run off the end of the plotted data."""
+    """Panning around should not run off the end of the plotted data.
+
+    Checked against ``getOriginalDataset``, not ``getData``: the curves use clip-to-view and
+    peak downsampling for speed, so ``getData`` returns only what is currently on screen. What
+    matters here is that the *whole* trace was handed to the curve.
+    """
     _, _, t, _ = movie_data
     movie._follow_chk.setChecked(False)
     movie.set_frame(400)
-    x, _y = movie._trace_curves[-1][0].getData()
+    x, _y = movie._trace_curves[-1][0].getOriginalDataset()
     assert x.size == t.size
+
+
+def test_following_hands_the_curve_only_the_visible_window(movie, movie_data):
+    """The complement: while following, only the window is handed over, which is the cheap path."""
+    _, _, t, _ = movie_data
+    movie._follow_chk.setChecked(True)
+    movie.set_frame(400)
+    x, _y = movie._trace_curves[-1][0].getOriginalDataset()
+    assert x.size < t.size
 
 
 def test_rechecking_follow_snaps_back_to_the_window(movie):

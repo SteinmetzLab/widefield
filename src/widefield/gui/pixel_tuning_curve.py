@@ -23,6 +23,8 @@ scroll wheel                 step time
 alt + left/right             rotate 90 degrees
 alt + up/down                flip vertically
 ``r``                        draw an ROI; traces become the ROI mean
+``e``                        cycle shaded s.e.m.: selected condition / all / none
+ctrl + scroll                step time (a plain scroll zooms, as pyqtgraph normally does)
 ==========================  ============================================================
 
 Differences, all deliberate: ``i``/``j``/``k``/``l`` and the arrow keys move relative to the
@@ -36,11 +38,12 @@ from __future__ import annotations
 import numpy as np
 
 from widefield.colormaps import blueblackred, condition_colors, to_pyqtgraph
-from widefield.events import event_locked_avg_svd
+from widefield.events import event_locked_avg_svd, peri_event_series
 from widefield.gui._common import (
     Orientation,
     ensure_app,
     install_hotkeys,
+    make_bandpass_control,
     polygon_mask,
     require_qt,
     run_app,
@@ -51,6 +54,33 @@ from widefield.svd import flatten_u
 __all__ = ["pixel_tuning_curve_viewer"]
 
 _PIXEL_STEP = 5  # matches the MATLAB's i/j/k/l step
+# Shaded-error modes cycled by the 'e' key.
+_SEM_NONE, _SEM_SELECTED, _SEM_ALL = 0, 1, 2
+_SEM_NAMES = {
+    _SEM_NONE: "no s.e.m.",
+    _SEM_SELECTED: "s.e.m. on selected",
+    _SEM_ALL: "s.e.m. on all",
+}
+
+
+def _nanmean(a, axis):
+    """nanmean without the all-NaN-slice warning (the result is still NaN)."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanmean(a, axis=axis)
+
+
+def _nanstd(a, axis):
+    """Sample s.d. (ddof=1) ignoring NaN, quietly."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanstd(a, axis=axis, ddof=1)
+
+
 _TIMER_MS = 100  # MATLAB timer Period 0.1 s
 
 
@@ -58,17 +88,33 @@ def _build():
     pg, QtCore, _QtGui, QtWidgets = require_qt()
 
     class PixelTuningCurveViewer(QtWidgets.QWidget):
-        def __init__(self, u, v, t, event_times, event_labels, calc_win, parent=None):
+        def __init__(
+            self,
+            u,
+            v,
+            t,
+            event_times,
+            event_labels,
+            calc_win,
+            upsample=4,
+            parent=None,
+        ):
             super().__init__(parent)
             self._u = np.asarray(u)
             self.shape = (int(self._u.shape[0]), int(self._u.shape[1]))
+            # Kept so the traces can be rebuilt per pixel with per-event spread, and so the
+            # band-pass control can re-derive everything from the unfiltered components.
+            self._v_raw = np.asarray(v, dtype=np.float32)
+            self._v = self._v_raw
+            self._t = np.asarray(t, dtype=float).ravel()
+            self._event_times = np.asarray(event_times, dtype=float).ravel()
+            self._event_labels = np.asarray(event_labels).ravel()
+            self._calc_win = tuple(calc_win)
+            self._upsample = int(upsample)
+            self._fs = float(1.0 / np.median(np.diff(self._t))) if self._t.size > 1 else 1.0
+            self._sem_mode = 1  # 0 = none, 1 = selected condition only, 2 = all
 
-            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-            try:
-                self._avg = event_locked_avg_svd(v, t, event_times, event_labels, calc_win)
-            finally:
-                QtWidgets.QApplication.restoreOverrideCursor()
-
+            self._recompute_average()
             self._win_samps = self._avg.win_samps
             self._conditions = self._avg.conditions
             self._n_cond = int(self._conditions.size)
@@ -105,6 +151,7 @@ def _build():
             self._playing = False
             self._roi = None
             self.roi: dict | None = None
+            self._sem: np.ndarray | None = None  # (nCond, nWindow) s.e.m. across events
 
             self.setWindowTitle("Pixel tuning curve (SVD)")
             self._colors = condition_colors(self._n_cond)
@@ -154,10 +201,22 @@ def _build():
                 self._trace_plot.plot(pen=pg.mkPen(tuple((c * 255).astype(int)), width=1))
                 for c in self._colors
             ]
+            # One shaded s.e.m. band per condition, drawn under the lines. FillBetweenItem
+            # needs two curves, so each band keeps its own (hidden) upper/lower pair.
+            self._sem_bands = []
+            for c in self._colors:
+                lo = self._trace_plot.plot(pen=None)
+                hi = self._trace_plot.plot(pen=None)
+                rgb = tuple((c * 255).astype(int))
+                band = pg.FillBetweenItem(lo, hi, brush=pg.mkBrush((*rgb, 70)))
+                band.setZValue(-10)  # behind the mean lines
+                self._trace_plot.addItem(band)
+                self._sem_bands.append((band, lo, hi))
             self._zero_line = pg.InfiniteLine(
-                pos=0.0, angle=90, pen=pg.mkPen("k", style=QtCore.Qt.DashLine)
+                pos=0.0, angle=90, pen=pg.mkPen((160, 160, 160), style=QtCore.Qt.DashLine)
             )
-            self._time_line = pg.InfiniteLine(pos=0.0, angle=90, pen=pg.mkPen("k", width=2))
+            # White, not black: the plot background is dark, so a black cursor vanished.
+            self._time_line = pg.InfiniteLine(pos=0.0, angle=90, pen=pg.mkPen("w", width=2))
             self._trace_plot.addItem(self._zero_line)
             self._trace_plot.addItem(self._time_line)
 
@@ -167,11 +226,20 @@ def _build():
             self._tc_plot.setLabel("left", "Activity")
             self._tc_plot.showGrid(x=True, y=True, alpha=0.2)
             self._tc_curve = self._tc_plot.plot(
-                pen=pg.mkPen("k", width=1), symbol="o", symbolSize=6, symbolBrush="k"
+                pen=pg.mkPen("w", width=1), symbol="o", symbolSize=6, symbolBrush="w"
             )
+            # Vertical mean +/- s.e.m. bars on each condition, unconnected.
+            self._tc_errors = pg.ErrorBarItem(pen=pg.mkPen((200, 200, 200), width=1), beam=0.0)
+            self._tc_plot.addItem(self._tc_errors)
+            # Bright green so the selected condition stands out against the dark background
+            # (a black star was invisible).
             self._tc_marker = pg.ScatterPlotItem(
-                size=14, symbol="star", pen=pg.mkPen("k"), brush=pg.mkBrush("k")
+                size=16,
+                symbol="star",
+                pen=pg.mkPen((0, 255, 0), width=2),
+                brush=pg.mkBrush((0, 255, 0)),
             )
+            self._tc_marker.setZValue(20)
             self._tc_plot.addItem(self._tc_marker)
             if not self._numeric_labels:
                 axis = self._tc_plot.getAxis("bottom")
@@ -183,11 +251,15 @@ def _build():
             self._glw.ci.layout.setColumnStretchFactor(2, 2)
             self._glw.ci.layout.setColumnStretchFactor(3, 2)
 
+            self.bandpass = make_bandpass_control(self._v_raw, self._fs, self._on_filtered)
+            layout.addWidget(self.bandpass)
+
             self._status = QtWidgets.QLabel()
             layout.addWidget(self._status)
             hint = QtWidgets.QLabel(
-                "click any panel · arrows: time/condition · wheel: time · ijkl: pixel · "
-                "p: play · f/s: speed · -/=: color scale · alt+arrows: rotate/flip · r: ROI"
+                "click any panel · arrows: time/condition · ctrl+wheel: time · ijkl: pixel · "
+                "p: play · f/s: speed · -/=: color scale · alt+arrows: rotate/flip · "
+                "r: ROI · e: s.e.m."
             )
             hint.setStyleSheet("color: gray;")
             hint.setWordWrap(True)
@@ -206,17 +278,72 @@ def _build():
                 self._stack_cond = self._cond_idx
             return self._stack[:, self._time_idx].reshape(self.shape)
 
-        def _recompute_traces(self) -> None:
-            """(nCond, nTime) traces for the current pixel, or the ROI mean if one is active.
+        def _recompute_average(self) -> None:
+            """Event-locked average of the components. Rebuilt when the band-pass changes.
 
-            One einsum over the small averaged V — never touches the full movie.
+            ``keep_peri=False``: the per-event spread is computed from the *pixel's* timecourse
+            instead (see :meth:`_recompute_traces`), which is exact and costs kilobytes, whereas
+            holding every event in component space would be hundreds of MB on an opto session.
             """
+            self._avg = event_locked_avg_svd(
+                self._v,
+                self._t,
+                self._event_times,
+                self._event_labels,
+                self._calc_win,
+                upsample=self._upsample,
+                keep_peri=False,
+            )
+
+        def _weights(self) -> np.ndarray:
+            """Spatial weights of the current pixel, or the ROI mean."""
             if self.roi is not None and self.roi["mask"].any():
-                weights = self._flat_u[self.roi["mask"].reshape(-1)].mean(axis=0)
-            else:
-                y, x = self._pixel
-                weights = self._flat_u[y * self.shape[1] + x]
-            self._traces = np.einsum("s,csw->cw", weights, self._avg_v)
+                return self._flat_u[self.roi["mask"].reshape(-1)].mean(axis=0)
+            y, x = self._pixel
+            return self._flat_u[y * self.shape[1] + x]
+
+        def _recompute_traces(self) -> None:
+            """Per-condition mean traces and their s.e.m. across events, for the current pixel.
+
+            The mean could come straight from the averaged components (one einsum), but the
+            s.e.m. cannot — a spread across events needs the individual events. Projecting the
+            pixel onto ``V`` first and windowing *that* gives both, and is far cheaper than
+            keeping every event in component space: one (nEvents, nWindow) matrix instead of
+            (nSV, nEvents, nWindow).
+
+            The mean is identical either way, because projection and averaging are both linear.
+            """
+            weights = self._weights()
+            trace = weights @ self._v[: self._nsv]
+            peri, _ = peri_event_series(
+                trace,
+                self._t,
+                self._event_times,
+                self._calc_win,
+                upsample=self._upsample,
+            )
+            # peri rows follow sorted event order, matching self._avg.sorted_labels.
+            labels = self._avg.sorted_labels
+            n_cond, n_win = self._n_cond, self._win_samps.size
+            self._traces = np.empty((n_cond, n_win))
+            self._sem = np.empty((n_cond, n_win))
+            for c, label in enumerate(self._conditions):
+                block = peri[labels == label]
+                self._traces[c] = _nanmean(block, axis=0)
+                n = np.sum(np.isfinite(block), axis=0)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    sd = _nanstd(block, axis=0)
+                    self._sem[c] = np.where(n > 1, sd / np.sqrt(np.maximum(n, 1)), 0.0)
+
+        def _on_filtered(self, filtered_v, _description) -> None:
+            """Band-passed components: redo the event-locked average and everything after it."""
+            self._v = np.asarray(filtered_v, dtype=np.float32)
+            self._recompute_average()
+            self._avg_v = np.ascontiguousarray(self._avg.avg_v[:, : self._nsv, :], dtype=np.float32)
+            self._stack = None
+            self._stack_cond = None
+            self._recompute_traces()
+            self._refresh_all()
 
         # ---------------------------------------------------------------- interaction
 
@@ -240,8 +367,13 @@ def _build():
                 self._refresh_all()
 
         def wheelEvent(self, event):
+            """Ctrl+wheel steps time; a plain wheel is left to pyqtgraph so it can zoom."""
+            if not (event.modifiers() & QtCore.Qt.ControlModifier):
+                super().wheelEvent(event)
+                return
             steps = event.angleDelta().y() / 120.0
             self._step_time(int(-steps) or (-1 if steps > 0 else 1))
+            event.accept()
 
         def _step_time(self, delta: int) -> None:
             self._time_idx = int(np.clip(self._time_idx + delta, 0, self._n_time - 1))
@@ -308,6 +440,9 @@ def _build():
                 self._scale_cax(1.25)
             elif key == QtCore.Qt.Key_R:
                 self.toggle_roi()
+            elif key == QtCore.Qt.Key_E:
+                self._sem_mode = (self._sem_mode + 1) % 3
+                self._refresh_all()
             else:
                 return False
             return True
@@ -394,6 +529,15 @@ def _build():
                     width=3 if c == self._cond_idx else 1,
                 )
                 curve.setPen(pen)
+
+                band, lo, hi = self._sem_bands[c]
+                show = self._sem_mode == _SEM_ALL or (
+                    self._sem_mode == _SEM_SELECTED and c == self._cond_idx
+                )
+                if show and self._sem is not None:
+                    lo.setData(self._win_samps, self._traces[c] - self._sem[c])
+                    hi.setData(self._win_samps, self._traces[c] + self._sem[c])
+                band.setVisible(bool(show))
             self._time_line.setPos(float(self._win_samps[self._time_idx]))
             self._trace_plot.setYRange(*self._cax, padding=0)
             self._trace_plot.setXRange(
@@ -402,6 +546,14 @@ def _build():
 
             tc = self._traces[:, self._time_idx]
             self._tc_curve.setData(self._cond_x, tc)
+            if self._sem is not None:
+                self._tc_errors.setData(
+                    x=self._cond_x,
+                    y=tc,
+                    top=self._sem[:, self._time_idx],
+                    bottom=self._sem[:, self._time_idx],
+                )
+                self._tc_errors.setVisible(self._sem_mode != _SEM_NONE)
             self._tc_marker.setData([self._cond_x[self._cond_idx]], [tc[self._cond_idx]])
             self._tc_plot.setYRange(*self._cax, padding=0)
             if self._n_cond > 1:
@@ -422,6 +574,12 @@ def _build():
             bits.append(f"t = {self._win_samps[self._time_idx]:+.3f} s")
             bits.append(f"condition {cond_str}")
             bits.append(f"scale +/-{self._cax[1]:.3g}")
+            bits.append(_SEM_NAMES[self._sem_mode])
+            if self._upsample > 1:
+                bits.append(f"{self._upsample}x upsampled")
+            if getattr(self, "bandpass", None) is not None:
+                if self.bandpass.description != "unfiltered":
+                    bits.append(self.bandpass.description)
             if self._playing:
                 bits.append(f"PLAYING x{self._rate}")
             elif self._rate != 1:
@@ -497,6 +655,7 @@ def pixel_tuning_curve_viewer(
     event_times: np.ndarray,
     event_labels: np.ndarray,
     calc_win: tuple[float, float] = (-0.5, 1.5),
+    upsample: int = 4,
     block: bool = True,
 ):
     """Open the tuning viewer. Equivalent to ``pixelTuningCurveViewerSVD(U,V,t,times,labels,win)``.
@@ -510,9 +669,12 @@ def pixel_tuning_curve_viewer(
     event_labels : (nEvents,) condition per event. Numeric labels become the tuning-curve
         x-axis; string labels are spaced evenly and shown as tick labels.
     calc_win : (start, stop) seconds relative to each event.
+    upsample : sample the peri-event window this many times finer than the frame rate.
+        Event times are jittered relative to frames, so interpolating each event onto a
+        dense grid before averaging recovers sub-frame detail. 1 reproduces the MATLAB.
     """
     app = ensure_app()
-    viewer = _get_class()(u, v, t, event_times, event_labels, calc_win)
+    viewer = _get_class()(u, v, t, event_times, event_labels, calc_win, upsample=upsample)
     viewer.resize(1500, 620)
     viewer.show()
     viewer.setFocus()
