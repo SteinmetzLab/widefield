@@ -31,6 +31,14 @@ Differences, all deliberate: ``i``/``j``/``k``/``l`` and the arrow keys move rel
 screen rather than the data, so they stay correct after a rotation (the MATLAB's ``i``/``k`` are
 data-space and invert visually once rotated). The ROI is a live, draggable polygon whose result
 stays available as :attr:`roi` instead of being dumped into the base workspace by ``assignin``.
+
+The band-pass control here high-passes **causally** (forwards only), unlike the continuous
+viewers. Zero-phase filtering runs backwards as well, which pushes part of every response back
+past ``t = 0``: the pre-event baselines then fan out by condition, in proportion to the response
+each condition eventually produces, and look like a genuine anticipatory effect. Filtering
+forwards only cannot move anything backwards. The cost is that the high-pass adds its own phase
+lag to the response — modest at the cutoffs used here, and preferable to a fabricated baseline.
+See :func:`widefield.svd.bandpass_filt`.
 """
 
 from __future__ import annotations
@@ -43,6 +51,7 @@ from widefield.gui._common import (
     Orientation,
     ensure_app,
     install_hotkeys,
+    install_wheel,
     make_bandpass_control,
     polygon_mask,
     require_qt,
@@ -253,7 +262,13 @@ def _build():
             self._glw.ci.layout.setColumnStretchFactor(2, 2)
             self._glw.ci.layout.setColumnStretchFactor(3, 2)
 
-            self.bandpass = make_bandpass_control(self._v_raw, self._fs, self._on_filtered)
+            # causal_highpass: this is the event-locked viewer, so a zero-phase high-pass would
+            # push part of each response backwards past t = 0 and separate the pre-event
+            # baselines by condition. Forwards-only cannot do that. Not a knob, because the
+            # zero-phase answer here is simply wrong and nobody should have to know why.
+            self.bandpass = make_bandpass_control(
+                self._v_raw, self._fs, self._on_filtered, causal_highpass=True
+            )
             layout.addWidget(self.bandpass)
 
             self._status = QtWidgets.QLabel()
@@ -269,8 +284,10 @@ def _build():
 
             self._image.scene().sigMouseClicked.connect(self._on_scene_click)
             self.setFocusPolicy(QtCore.Qt.StrongFocus)
-            # Keys work from anywhere in the window, not only while this widget has focus.
+            # Keys and ctrl+wheel work from anywhere in the window, not only while this widget
+            # has focus — and, for the wheel, not only when the cursor is off the plots.
             install_hotkeys(self, self._handle_key)
+            install_wheel(self, self._handle_wheel)
 
         # ---------------------------------------------------------------- computation
 
@@ -369,13 +386,27 @@ def _build():
                 self._refresh_all()
 
         def wheelEvent(self, event):
-            """Ctrl+wheel steps time; a plain wheel is left to pyqtgraph so it can zoom."""
-            if not (event.modifiers() & QtCore.Qt.ControlModifier):
+            """Ctrl+wheel steps time; a plain wheel is left to pyqtgraph so it can zoom.
+
+            In practice :func:`install_wheel` handles the event long before it could reach here —
+            pyqtgraph's view consumes it on the way up. This override only covers a wheel event
+            delivered straight to the container.
+            """
+            if not self._handle_wheel(event.angleDelta().y() / 120.0, event.modifiers()):
                 super().wheelEvent(event)
                 return
-            steps = event.angleDelta().y() / 120.0
-            self._step_time(int(-steps) or (-1 if steps > 0 else 1))
             event.accept()
+
+        def _handle_wheel(self, steps, mods) -> bool:
+            """Act on a wheel notch; True if consumed. See install_wheel."""
+            if not (mods & QtCore.Qt.ControlModifier):
+                return False  # plain wheel: pyqtgraph's zoom
+            # Scrolling down (negative) moves forward in time, matching the MATLAB, which counts
+            # VerticalScrollCount positive downwards. Round to at least one step so a trackpad's
+            # fractional notches still move.
+            n = int(round(steps)) or (1 if steps > 0 else -1)
+            self._step_time(-n)
+            return True
 
         def _step_time(self, delta: int) -> None:
             self._time_idx = int(np.clip(self._time_idx + delta, 0, self._n_time - 1))

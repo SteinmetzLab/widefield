@@ -92,11 +92,19 @@ the key table. Deliberate differences:
 Hotkeys work wherever focus happens to be inside the window — except while the caret is in a text
 box, where they stay out of the way.
 
-Both the movie and correlation viewers have a **temporal band-pass**: type cutoffs in Hz (0 and
-`inf` by default). Filtering `V` filters every pixel, so it re-applies quickly. In the correlation
-viewer it changes the covariance and so rebuilds the precompute — worth it, because removing the
-slow drift before correlating usually sharpens the functional boundaries, and restricting to a band
-is how you ask which timescale the correlation structure lives on.
+All three viewers have a **temporal band-pass**: type cutoffs in Hz (0 and `inf` by default).
+Filtering `V` filters every pixel, so it re-applies quickly. In the correlation viewer it changes
+the covariance and so rebuilds the precompute — worth it, because removing the slow drift before
+correlating usually sharpens the functional boundaries, and restricting to a band is how you ask
+which timescale the correlation structure lives on.
+
+- **The tuning viewer high-passes *causally*** (forwards only); the movie and correlation viewers
+  filter zero-phase. A zero-phase high-pass runs backwards as well as forwards, so part of every
+  response lands *before* the event that caused it: on an opto session the pre-stimulus baselines
+  fan out in proportion to laser power and look like anticipation. Filtering forwards only cannot
+  move anything backwards. Only the high-pass is made causal — a causal low-pass would delay every
+  measured peak, and its backward smear is small and does not grow with response size. The status
+  line names whichever combination is in force. See `bandpass_filt(..., causal_highpass=True)`.
 
 Also in the movie viewer: a **Follow** toggle so a manual zoom on the trace plots survives playback
 instead of being reset every frame, a scrub slider, and `nsv_display` to cap components per frame

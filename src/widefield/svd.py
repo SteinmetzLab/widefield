@@ -16,7 +16,7 @@ Pure numpy/scipy — no Qt, so this stays importable on a headless machine.
 from __future__ import annotations
 
 import numpy as np
-from scipy.signal import butter, detrend, filtfilt, lfilter, sosfiltfilt
+from scipy.signal import butter, detrend, filtfilt, lfilter, sosfilt, sosfilt_zi, sosfiltfilt
 
 __all__ = [
     "flatten_u",
@@ -201,8 +201,9 @@ def bandpass_filt(
     highpass: float | None = None,
     lowpass: float | None = None,
     order: int = 3,
+    causal_highpass: bool = False,
 ) -> np.ndarray:
-    """Zero-phase Butterworth band-pass / high-pass / low-pass of the temporal components.
+    """Butterworth band-pass / high-pass / low-pass of the temporal components.
 
     Filtering ``V`` filters every pixel, because reconstruction ``U @ V`` is linear in time — so
     this costs a filter over an ``(nSV, nFrames)`` array instead of the whole movie.
@@ -214,6 +215,8 @@ def bandpass_filt(
     highpass : lower cutoff. ``None``, 0, or negative means no high-pass.
     lowpass : upper cutoff. ``None``, ``inf``, or >= Nyquist means no low-pass.
     order : Butterworth order (per direction).
+    causal_highpass : run the *high-pass* one-pass forward (``sosfilt``) instead of zero-phase.
+        The low-pass stays zero-phase either way; see the note below.
 
     Returns
     -------
@@ -222,9 +225,25 @@ def bandpass_filt(
 
     Notes
     -----
-    Zero-phase (``filtfilt``), unlike :func:`detrend_and_filt`: a viewer must not introduce a lag
-    between the movie and the behavioral traces beside it, and there is no causality requirement
-    when you already have the whole recording.
+    Zero-phase (``filtfilt``) by default, unlike :func:`detrend_and_filt`: a movie viewer must not
+    introduce a lag between the movie and the behavioral traces beside it, and there is no
+    causality requirement when you already have the whole recording.
+
+    ``causal_highpass=True`` exists for *event-locked* analysis, where zero-phase high-passing is
+    actively misleading. A high-pass removes the local mean, so a sustained response after an
+    event has to be balanced by an opposite deflection somewhere; run backwards as well as
+    forwards, half of that lands *before* the event. On an opto session the pre-stimulus baseline
+    then separates by laser power — an apparent "response" a full second before the laser fires.
+    Filtering forwards only cannot move anything backwards in time, so the baseline stays put.
+
+    Only the high-pass is made causal. A zero-phase *low-pass* also smears backwards, but only by
+    its impulse width (tens of ms at the cutoffs used here) and, unlike the high-pass artifact,
+    the amount does not grow with the size of the response — whereas making it causal *would*
+    delay every measured peak latency. So the low-pass stays zero-phase, and with it the timing.
+
+    When causal, the filter state is initialized to the steady state for each row's first sample
+    (``sosfilt_zi``) rather than to zero. Otherwise a high-pass started from a large DC level
+    rings for ~1/cutoff seconds — minutes, at 0.01 Hz — and the start of the recording is garbage.
 
     Uses second-order-sections rather than transfer-function coefficients. At the cutoffs that
     matter here — 0.01 Hz against a 35 Hz frame rate is a normalized frequency of 6e-4 — a
@@ -250,6 +269,14 @@ def bandpass_filt(
     if hp is not None and lp is not None and hp >= lp:
         raise ValueError(f"highpass {hp} Hz must be below lowpass {lp} Hz")
 
+    if causal_highpass and hp is not None:
+        # Designed as separate stages so the two halves can be filtered differently; a single
+        # band-pass design would force one choice on both.
+        out = _sosfilt_causal(butter(order, hp / nyquist, btype="highpass", output="sos"), v)
+        if lp is None:
+            return out
+        return sosfiltfilt(butter(order, lp / nyquist, btype="lowpass", output="sos"), out, axis=-1)
+
     if hp is not None and lp is not None:
         sos = butter(order, [hp / nyquist, lp / nyquist], btype="bandpass", output="sos")
     elif hp is not None:
@@ -257,6 +284,20 @@ def bandpass_filt(
     else:
         sos = butter(order, lp / nyquist, btype="lowpass", output="sos")
     return sosfiltfilt(sos, v, axis=-1)
+
+
+def _sosfilt_causal(sos: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """One-pass ``sosfilt`` along the last axis, started from each row's own first sample.
+
+    With zero initial conditions a high-pass sees a step from 0 to ``v[:, 0]`` at sample 0 and
+    rings for roughly ``1 / cutoff`` seconds. Scaling ``sosfilt_zi`` by the first sample starts
+    the filter already settled at that level, so the output begins near zero instead.
+    """
+    if v.shape[-1] == 0:
+        return v.copy()
+    zi = sosfilt_zi(sos)[:, np.newaxis, :] * v[np.newaxis, :, 0, np.newaxis]
+    out, _ = sosfilt(sos, v, axis=-1, zi=zi)
+    return out
 
 
 def detrend_and_filt(v: np.ndarray, fs: float) -> np.ndarray:

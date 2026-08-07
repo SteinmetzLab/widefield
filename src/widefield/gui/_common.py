@@ -27,6 +27,7 @@ __all__ = [
     "run_app",
     "clamp",
     "install_hotkeys",
+    "install_wheel",
     "make_bandpass_control",
     "window_title",
     "text_entry_focused",
@@ -207,7 +208,7 @@ def require_qt():
     return pg, QtCore, QtGui, QtWidgets
 
 
-def make_bandpass_control(v_raw, fs, on_apply, order: int = 3):
+def make_bandpass_control(v_raw, fs, on_apply, order: int = 3, causal_highpass: bool = False):
     """A row of band-pass controls: high-pass / low-pass cutoffs, Apply, Reset, status.
 
     Shared by the viewers rather than duplicated, so the parsing rules, the Nyquist handling and
@@ -220,6 +221,10 @@ def make_bandpass_control(v_raw, fs, on_apply, order: int = 3):
 
     Filtering ``V`` filters every pixel (reconstruction is linear in time), which is what makes an
     interactive control affordable at all.
+
+    ``causal_highpass`` runs the high-pass forwards only, so nothing after an event can leak into
+    the time before it. The event-locked viewer sets it; the continuous ones do not. See
+    :func:`widefield.svd.bandpass_filt` for why.
 
     Returns the control widget. It exposes ``hp_edit``, ``lp_edit``, ``label``, ``apply()``,
     ``reset()`` and ``description``.
@@ -239,7 +244,14 @@ def make_bandpass_control(v_raw, fs, on_apply, order: int = 3):
             row.addWidget(QtWidgets.QLabel("Band-pass — high-pass (Hz):"))
             self.hp_edit = QtWidgets.QLineEdit("0")
             self.hp_edit.setFixedWidth(70)
-            self.hp_edit.setToolTip("Lower cutoff in Hz. 0 means no high-pass.")
+            tip = "Lower cutoff in Hz. 0 means no high-pass."
+            if causal_highpass:
+                tip += (
+                    "\n\nApplied forwards only (causal), so the response after an event cannot"
+                    "\nleak backwards into the pre-event baseline. A zero-phase high-pass would"
+                    "\nsplit the baselines apart by condition before t = 0."
+                )
+            self.hp_edit.setToolTip(tip)
             row.addWidget(self.hp_edit)
 
             row.addWidget(QtWidgets.QLabel("low-pass (Hz):"))
@@ -290,7 +302,14 @@ def make_bandpass_control(v_raw, fs, on_apply, order: int = 3):
         def apply(self) -> None:
             try:
                 hp, lp = self.cutoffs()
-                filtered = bandpass_filt(v_raw, fs, highpass=hp, lowpass=lp, order=order)
+                filtered = bandpass_filt(
+                    v_raw,
+                    fs,
+                    highpass=hp,
+                    lowpass=lp,
+                    order=order,
+                    causal_highpass=causal_highpass,
+                )
             except ValueError as exc:
                 self.label.setText(f"invalid: {exc}")
                 self.label.setStyleSheet("color: #cc4444;")
@@ -307,7 +326,14 @@ def make_bandpass_control(v_raw, fs, on_apply, order: int = 3):
             else:
                 desc = "unfiltered"
             self.description = desc
-            self.label.setText(f"{desc} (Butterworth order {order}, zero-phase)")
+            if causal_highpass and active_hp:
+                # Name both halves: the two are filtered differently and the difference shows.
+                phase = "causal high-pass" + (", zero-phase low-pass" if active_lp else "")
+            else:
+                phase = "zero-phase"
+            self.label.setText(
+                desc if desc == "unfiltered" else f"{desc} (Butterworth order {order}, {phase})"
+            )
             self.label.setStyleSheet("color: gray;")
 
             # A rebuild can be slow (the correlation viewer re-does its covariance), so show a
@@ -381,6 +407,38 @@ def install_hotkeys(widget, handler):
             return False
 
     filt = _HotkeyFilter(widget)
+    widget.installEventFilter(filt)
+    for child in widget.findChildren(QtWidgets.QWidget):
+        child.installEventFilter(filt)
+    return filt
+
+
+def install_wheel(widget, handler):
+    """Route wheel events anywhere inside ``widget`` to ``handler(steps, modifiers) -> bool``.
+
+    ``steps`` is notches of the wheel: positive away from the user, fractional on a trackpad or a
+    high-resolution mouse. Returning False leaves the event alone, so a handler that only claims
+    ctrl+wheel keeps pyqtgraph's plain-wheel zoom intact.
+
+    Overriding ``wheelEvent`` on the container does *not* work, which is why ctrl+wheel looked
+    dead in the tuning viewer. A wheel event is delivered to the child widget under the cursor —
+    here the ``GraphicsLayoutWidget``'s viewport — and pyqtgraph accepts it to do its zoom, so it
+    never propagates up to the container whose ``wheelEvent`` was overridden. An event filter sees
+    it first instead. Same reasoning, and same structure, as :func:`install_hotkeys`; it is
+    likewise not installed on the ``QApplication``.
+    """
+    _pg, QtCore, _QtGui, QtWidgets = require_qt()
+
+    class _WheelFilter(QtCore.QObject):
+        def eventFilter(self, _obj, event):
+            if event.type() != QtCore.QEvent.Type.Wheel:
+                return False
+            if handler(event.angleDelta().y() / 120.0, event.modifiers()):
+                event.accept()
+                return True
+            return False
+
+    filt = _WheelFilter(widget)
     widget.installEventFilter(filt)
     for child in widget.findChildren(QtWidgets.QWidget):
         child.installEventFilter(filt)
