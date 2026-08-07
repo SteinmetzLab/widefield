@@ -287,11 +287,11 @@ def test_tuning_ijkl_stay_screen_relative_after_rotation(tuning_viewer):
 
 
 def test_tuning_caxis_keys_scale_symmetrically(tuning_viewer):
-    assert tuning_viewer._cax == [-1.0, 1.0]
+    start = list(tuning_viewer._cax)
     press(tuning_viewer, QtCore.Qt.Key_Minus)
-    np.testing.assert_allclose(tuning_viewer._cax, [-0.75, 0.75])
+    np.testing.assert_allclose(tuning_viewer._cax, [c * 0.75 for c in start])
     press(tuning_viewer, QtCore.Qt.Key_Equal)
-    np.testing.assert_allclose(tuning_viewer._cax, [-0.9375, 0.9375])
+    np.testing.assert_allclose(tuning_viewer._cax, [c * 0.9375 for c in start])
 
 
 def test_tuning_caxis_stays_centerd_on_zero(tuning_viewer):

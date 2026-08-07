@@ -17,6 +17,7 @@ __all__ = [
     "EventLockedAvg",
     "event_locked_avg_svd",
     "peri_event_series",
+    "peri_event_components",
     "tuning_by_condition",
 ]
 
@@ -194,6 +195,38 @@ def peri_event_series(
     peri_times = (event_times[:, None] + win_samps[None, :]).ravel()
     peri = np.interp(peri_times, t, series, left=np.nan, right=np.nan)
     return peri.reshape(event_times.size, win_samps.size), win_samps
+
+
+def peri_event_components(
+    v: np.ndarray,
+    t: np.ndarray,
+    event_time: float,
+    calc_win: tuple[float, float],
+    fs: float | None = None,
+    upsample: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Components around **one** event → ``(peri_v, win_samps)``, ``peri_v`` ``(nSV, nWindow)``.
+
+    The single-event case of :func:`event_locked_avg_svd`, kept separate because it is what a
+    viewer needs to reconstruct one trial's own movie. Doing it for every event at once is the
+    allocation that ``keep_peri=False`` exists to avoid — but a single event is kilobytes, and
+    only one trial is ever on screen.
+
+    Sampled on the same grid :func:`peri_event_window` builds, so the result lines up sample for
+    sample with a condition average computed with the same ``calc_win`` and ``upsample``.
+    """
+    v = np.asarray(v)
+    t = np.asarray(t, dtype=float).ravel()
+    if v.ndim != 2:
+        raise ValueError(f"V must be (nSV, nTimePoints); got shape {v.shape}")
+    win_samps, _ = peri_event_window(t, calc_win, fs, upsample)
+    query = float(event_time) + win_samps
+    peri = np.empty((v.shape[0], win_samps.size), dtype=float)
+    for comp in range(v.shape[0]):
+        peri[comp] = np.interp(
+            query, t, np.asarray(v[comp], dtype=float), left=np.nan, right=np.nan
+        )
+    return peri, win_samps
 
 
 def tuning_by_condition(

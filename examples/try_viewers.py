@@ -379,7 +379,11 @@ def main() -> int:
             "Correlation     just move the mouse (hover is on); h toggles it; v for",
             "                variance normalization; try a 1 Hz high-pass",
         ],
-        "tuning": ["Tuning          click all three panels; p to play; r for an ROI; ijkl"],
+        "tuning": [
+            "Tuning          click any of the four panels; m for median instead of mean;",
+            "                click a single trial (bottom right) to send just that trial",
+            "                to the brain panel; [ ] step trials; esc back to the average",
+        ],
         "movie": [
             "Movie           p to play; ctrl+click to add pixels; -/= color scale;",
             "                type band-pass cutoffs in Hz; Follow keeps a zoom on playback",

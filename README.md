@@ -110,6 +110,32 @@ Also in the movie viewer: a **Follow** toggle so a manual zoom on the trace plot
 instead of being reset every frame, a scrub slider, and `nsv_display` to cap components per frame
 if full-rank playback stutters.
 
+### Seeing behind a condition average
+
+The tuning viewer has a **fourth panel** the MATLAB does not: every individual trial behind the
+selected condition, in white, with the condition's average over them. It exists because a
+condition average is not evidence on its own — one trial that wandered off is enough to move a
+90-trial mean far enough to invent an effect, and nothing in the average shows you that. Two
+things to do about it:
+
+- **`m` swaps the mean for a median.** If a condition's average collapses back in line with its
+  neighbors, one or two trials were carrying it. The band swaps with the statistic: mean ± s.e.m.,
+  or median + 95% CI.
+- **Click a trial to isolate it.** That trial's own movie replaces the condition average in the
+  brain panel, reconstructed from its own components rather than approximated. `[`/`]` step
+  through trials, `esc` goes back to the average.
+
+The median's interval is the **distribution-free order-statistic interval** (invert the sign
+test), not a bootstrap: exact rather than asymptotic, built only from values trials actually
+reached, and one sort rather than ~1000 resampled medians per condition — which matters because it
+recomputes on every pixel you click. Below 6 trials no such interval reaches 95% and the band is
+left blank rather than quietly widened. See [`stats.py`](src/widefield/stats.py).
+
+The brain panel stays a **mean** even in median mode, because a pixelwise median cannot be built
+from component medians (the median does not commute with `U @ V`) and doing it honestly would mean
+reconstructing every trial at full resolution for every frame — seconds each, against the ~8 ms
+that makes scrubbing feel live. Isolate the trial instead; that shows it exactly.
+
 ### Performance
 
 Measured against the MATLAB on a real session (`AB_0004/2021-03-24/1`, 512x512, 200 components;

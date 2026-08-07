@@ -39,6 +39,7 @@ from widefield.correlation import SeedCorrelation, correlation_map_raw
 from widefield.events import (
     EventLockedAvg,
     event_locked_avg_svd,
+    peri_event_components,
     peri_event_series,
     peri_event_window,
     tuning_by_condition,
@@ -51,6 +52,7 @@ from widefield.hemo import (
 )
 from widefield.io import UVData, discover_channels, load_uvt
 from widefield.signals import schmitt, schmitt_times
+from widefield.stats import trial_summary
 from widefield.svd import (
     bandpass_filt,
     bin_image,
@@ -85,7 +87,9 @@ __all__ = [
     "EventLockedAvg",
     "peri_event_window",
     "peri_event_series",
+    "peri_event_components",
     "tuning_by_condition",
+    "trial_summary",
     # correlation
     "SeedCorrelation",
     "correlation_map_raw",
